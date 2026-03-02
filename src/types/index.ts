@@ -3,12 +3,16 @@
 // =============================================================================
 // All shared interfaces and types used across the application are defined here.
 // Import from '../types' in other modules.
+//
+// NESTJS NOTE: In NestJS, we use DTOs (Data Transfer Objects) with
+// class-validator decorators for request validation instead of Zod.
+// However, these interfaces remain useful for internal typing.
 // =============================================================================
 
 import { Request } from 'express';
 
 // ---------------------------------------------------------------------------
-// Express request extensions
+// Express request extensions (used inside NestJS's Express adapter)
 // ---------------------------------------------------------------------------
 
 /**
@@ -40,12 +44,6 @@ export interface DescopeSession {
   [key: string]: unknown;
 }
 
-/** Body sent by a service to POST /auth/token to obtain a JWT */
-export interface TokenRequestBody {
-  tribeId: string;
-  secret: string;
-}
-
 /** Response returned when a service token is successfully issued */
 export interface TokenResponse {
   accessToken: string;
@@ -55,11 +53,6 @@ export interface TokenResponse {
   scopes: string[];
 }
 
-/** Body sent to POST /auth/token/refresh */
-export interface RefreshTokenBody {
-  refreshToken: string;
-}
-
 // ---------------------------------------------------------------------------
 // Service Registry types (Dynamic Service Registry)
 // ---------------------------------------------------------------------------
@@ -67,41 +60,26 @@ export interface RefreshTokenBody {
 /**
  * A service manifest is what a tribe/service sends when registering
  * with the API Center via POST /api/v1/registry/register.
- * This is the "contract" between a service and the platform.
  */
 export interface ServiceManifest {
-  /** Unique service identifier (e.g., 'campusone', 'analytics-service') */
   serviceId: string;
-  /** Human-readable service name */
   name: string;
-  /** Base URL where the service is running */
   baseUrl: string;
-  /** Scopes this service requires callers to have (e.g., ['read:users', 'write:orders']) */
   requiredScopes: string[];
-  /** Route prefixes this service exposes (e.g., ['/users', '/courses']) */
   exposes: string[];
-  /** Service IDs this service is allowed to call through the API Center */
   consumes: string[];
-  /** Service health check endpoint (relative to baseUrl) */
   healthCheck?: string;
-  /** Service version string */
   version?: string;
-  /** Optional description of the service */
   description?: string;
-  /** Optional tags for categorization/discovery */
   tags?: string[];
 }
 
 /**
- * A registry entry is what the ServiceRegistry stores internally.
- * Extends ServiceManifest with platform-managed metadata.
+ * A registry entry extends ServiceManifest with platform-managed metadata.
  */
 export interface ServiceRegistryEntry extends ServiceManifest {
-  /** When the service was first registered */
   registeredAt: string;
-  /** When the registration was last updated */
   updatedAt: string;
-  /** Current service status */
   status: 'active' | 'inactive' | 'degraded';
 }
 
@@ -114,21 +92,14 @@ export interface ServiceRegistryMap {
 // Legacy Tribe types (kept for backwards compatibility)
 // ---------------------------------------------------------------------------
 
-/** Configuration for a single tribe in the registry */
 export interface TribeConfig {
-  /** Human-readable tribe name */
   name: string;
-  /** Base URL where the tribe's own API is running */
   baseUrl: string;
-  /** Descope permission strings granted to this tribe */
   permissions: string[];
-  /** Route prefixes this tribe exposes for other tribes to consume */
   exposes: string[];
-  /** IDs of other tribes this tribe is allowed to call through the API Center */
   consumes: string[];
 }
 
-/** Map of tribe ID → TribeConfig */
 export interface TribeConfigMap {
   [tribeId: string]: TribeConfig;
 }
@@ -137,34 +108,34 @@ export interface TribeConfigMap {
 // External API types
 // ---------------------------------------------------------------------------
 
-/** Supported authentication methods for external APIs */
-export type ExternalAuthType = 'bearer' | 'api-key';
+export type ExternalAuthType = 'bearer' | 'api-key' | 'basic' | 'apiKey';
 
-/** Configuration for a registered external API */
 export interface ExternalApiConfig {
-  /** Base URL of the external API */
+  name: string;
+  displayName: string;
   baseUrl: string;
-  /** How the API authenticates: bearer token or API key header */
   authType: ExternalAuthType;
-  /** If authType is 'api-key', the header name to send it in (e.g., 'X-API-Key') */
-  headerName?: string;
-  /** The environment variable name that holds the secret/token */
-  tokenEnvKey: string;
-  /** Brief description of what this API does */
-  description: string;
+  authHeader: string;
+  authValue: string;
+  timeout: number;
+  rateLimit?: { windowMs: number; max: number };
+  healthEndpoint?: string;
+  description?: string;
 }
 
-/** Map of API name → ExternalApiConfig */
 export interface ExternalApiConfigMap {
   [apiName: string]: ExternalApiConfig;
 }
 
-/** Options passed to ExternalApiManager.call() */
 export interface ExternalCallOptions {
   method?: string;
   path?: string;
+  query?: Record<string, string>;
+  body?: unknown;
   data?: unknown;
   params?: Record<string, string>;
+  headers?: Record<string, string>;
+  timeout?: number;
   tribeId?: string;
   correlationId?: string;
 }
@@ -173,14 +144,12 @@ export interface ExternalCallOptions {
 // Kafka types
 // ---------------------------------------------------------------------------
 
-/** Metadata attached to every Kafka message published by the API Center */
 export interface KafkaMessageMeta {
   timestamp: string;
   source: string;
   correlationId?: string;
 }
 
-/** Shape of an audit log event published to Kafka */
 export interface AuditLogEvent {
   tribeId: string;
   method: string;
@@ -192,51 +161,9 @@ export interface AuditLogEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Config types
-// ---------------------------------------------------------------------------
-
-/** Top-level application configuration (loaded from environment variables) */
-export interface AppConfig {
-  port: number;
-  nodeEnv: string;
-  cors: {
-    origin: string | string[];
-    credentials: boolean;
-  };
-  descope: {
-    projectId: string;
-    managementKey: string;
-  };
-  kafka: {
-    clientId: string;
-    brokers: string[];
-    groupId: string;
-  };
-  /** Platform admin secret used to protect the /register endpoint */
-  platformAdminSecret: string;
-  /** Redis connection URL for the service registry cache */
-  redis: {
-    url: string;
-  };
-  /** Supabase configuration for persistent registry storage */
-  supabase: {
-    url: string;
-    serviceRoleKey: string;
-  };
-  rateLimit: {
-    windowMs: number;
-    max: number;
-  };
-  external: {
-    timeout: number;
-  };
-}
-
-// ---------------------------------------------------------------------------
 // API Response envelope (standardized response shape)
 // ---------------------------------------------------------------------------
 
-/** Standard success response wrapper */
 export interface ApiSuccessResponse<T = unknown> {
   success: true;
   data: T;
@@ -246,7 +173,6 @@ export interface ApiSuccessResponse<T = unknown> {
   };
 }
 
-/** Standard error response wrapper */
 export interface ApiErrorResponse {
   success: false;
   error: {

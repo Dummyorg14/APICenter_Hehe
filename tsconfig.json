@@ -1,31 +1,37 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
     "module": "commonjs",
-    "lib": ["ES2022"],
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2022",
+    "sourceMap": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
+    "baseUrl": "./",
+    "incremental": true,
     "skipLibCheck": true,
+    "strictNullChecks": true,
+    "noImplicitAny": true,
+    "strictBindCallApply": true,
     "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
     "resolveJsonModule": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "moduleResolution": "node",
-    "baseUrl": ".",
+    "esModuleInterop": true,
+    "lib": ["ES2022"],
     "paths": {
       "@config/*": ["src/config/*"],
-      "@gateway/*": ["src/gateway/*"],
+      "@shared/*": ["src/shared/*"],
       "@auth/*": ["src/auth/*"],
       "@kafka/*": ["src/kafka/*"],
+      "@registry/*": ["src/registry/*"],
       "@tribes/*": ["src/tribes/*"],
       "@external/*": ["src/external/*"],
-      "@middleware/*": ["src/middleware/*"],
-      "@types/*": ["src/types/*"]
+      "@health/*": ["src/health/*"]
     }
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests"]
+  "exclude": ["node_modules", "dist", "test"]
 }

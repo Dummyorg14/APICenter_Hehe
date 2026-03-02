@@ -1,20 +1,17 @@
 // =============================================================================
-// src/external/apis/email.ts — Email Service API configuration
-// =============================================================================
-// Defines the external Email API. Provides:
-//  - Send transactional and marketing emails
-//  - Template-based email rendering
-//  - Delivery and open/click tracking
-//
-// The API Center manages the email service token so tribes don't need
-// individual email provider accounts.
+// src/external/apis/email.ts — Email API Configuration
 // =============================================================================
 
 import { ExternalApiConfig } from '../../types';
 
 export const emailApi: ExternalApiConfig = {
-  baseUrl: process.env.EXT_EMAIL_URL || 'https://api.email-provider.com',
+  name: 'email',
+  displayName: 'Email Service',
+  baseUrl: process.env.EMAIL_API_URL || 'https://api.sendgrid.com/v3',
   authType: 'bearer',
-  tokenEnvKey: 'EXT_EMAIL_TOKEN',
-  description: 'Email services: transactional emails, templates, delivery tracking',
+  authHeader: 'Authorization',
+  authValue: process.env.EMAIL_API_KEY || '',
+  timeout: 15_000,
+  rateLimit: { windowMs: 60_000, max: 100 },
+  healthEndpoint: '/health',
 };

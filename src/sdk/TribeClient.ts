@@ -1,318 +1,165 @@
 // =============================================================================
-// src/sdk/TribeClient.ts — SDK for tribes to communicate through API Center
+// src/sdk/TribeClient.ts — Standalone SDK for registered Tribe services
 // =============================================================================
-// This is the client library that each tribe/service installs to interact
-// with the API Center. It handles:
+// This file is NOT part of the NestJS DI container — it's a standalone HTTP
+// client that Tribe microservices use to communicate with the APICenter
+// gateway.  It is exported from the package (see package.json "exports").
 //
-//  1. AUTHENTICATION — Automatically obtains and caches a JWT by presenting
-//     the service's credentials to /api/v1/auth/token.
+// UNCHANGED from the Express version — the SDK is framework-agnostic; it only
+// speaks HTTP to the gateway's public REST endpoints.
 //
-//  2. INTER-SERVICE CALLS (LOOPBACK) — All calls between tribes go THROUGH
-//     the API Center. Tribe A never calls Tribe B directly. Instead:
+// USAGE (from a Tribe microservice):
 //
-//       Tribe A → TribeClient.call('tribe-b', '/users') →
-//       API Center /api/v1/tribes/tribe-b/users →
-//       Tribe B's /users endpoint
-//
-//     This "loopback" pattern ensures that every inter-tribe call is:
-//       - Authenticated (JWT validated)
-//       - Authorized (scopes checked against registry)
-//       - Audited (logged to Kafka)
-//       - Observable (correlation IDs, metrics)
-//
-//  3. EXTERNAL API CALLS — Tribes can call external APIs through the
-//     API Center, which holds all third-party credentials.
-//
-//  4. TOKEN REFRESH — Automatically refreshes the JWT before it expires.
-//
-//  5. SELF-REGISTRATION — Tribes can register themselves with the platform
-//     by calling TribeClient.register() with their manifest.
-//
-// USAGE (inside a tribe's codebase):
-//
-//   import { TribeClient } from '@api-center/sdk';
+//   import { TribeClient } from '@apicenter/sdk';
 //
 //   const client = new TribeClient({
-//     apiCenterUrl: 'http://api-center:3000',
-//     serviceId: 'campusone',
-//     secret: process.env.API_CENTER_SECRET!,
+//     gatewayUrl: 'http://localhost:4000',
+//     tribeId:    'my-tribe',
+//     secret:     process.env.MY_TRIBE_SECRET!,
 //   });
 //
-//   // Authenticate (get JWT from API Center)
 //   await client.authenticate();
-//
-//   // Call another tribe through the API Center (loopback)
-//   const users = await client.call('analytics-service', '/reports/daily');
-//
-//   // Call an external API through the API Center
-//   const location = await client.callExternal('geolocation', '/geocode', {
-//     params: { address: '123 Main St' },
-//   });
-//
-//   // Register this service with the platform
-//   await client.register({
-//     serviceId: 'campusone',
-//     name: 'CampusOne',
-//     baseUrl: 'http://campusone-service:4001',
-//     requiredScopes: ['read:users', 'write:users'],
-//     exposes: ['/users', '/courses'],
-//     consumes: ['analytics-service'],
-//   }, process.env.PLATFORM_ADMIN_SECRET!);
+//   const users = await client.callService('user-service', '/users');
 // =============================================================================
 
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface TribeClientConfig {
-  /** Base URL of the API Center (e.g., 'http://api-center:3000') */
-  apiCenterUrl: string;
-  /** This service's unique ID (must match registry) */
-  serviceId: string;
-  /** This service's secret for authentication */
+export interface TribeClientOptions {
+  /** Base URL of the APICenter gateway (e.g. http://localhost:4000) */
+  gatewayUrl: string;
+  /** Your tribe's service identifier */
+  tribeId: string;
+  /** The shared secret (env-provisioned) for M2M token issuance */
   secret: string;
-  /** Request timeout in ms (default: 10000) */
+  /** Optional timeout in ms (default 30 000) */
   timeout?: number;
-  /** API version to use (default: 'v1') */
-  apiVersion?: string;
 }
-
-export interface CallOptions {
-  /** HTTP method (default: 'GET') */
-  method?: string;
-  /** Request body data */
-  data?: unknown;
-  /** Query parameters */
-  params?: Record<string, string>;
-  /** Additional headers */
-  headers?: Record<string, string>;
-}
-
-export interface ServiceManifestInput {
-  serviceId: string;
-  name: string;
-  baseUrl: string;
-  requiredScopes: string[];
-  exposes: string[];
-  consumes: string[];
-  healthCheck?: string;
-  version?: string;
-  description?: string;
-  tags?: string[];
-}
-
-interface TokenData {
-  accessToken: string;
-  expiresIn: number;
-  obtainedAt: number;
-}
-
-// ---------------------------------------------------------------------------
-// TribeClient
-// ---------------------------------------------------------------------------
 
 export class TribeClient {
-  private readonly config: Required<Pick<TribeClientConfig, 'apiCenterUrl' | 'serviceId' | 'secret' | 'timeout' | 'apiVersion'>>;
   private readonly http: AxiosInstance;
-  private tokenData: TokenData | null = null;
+  private readonly tribeId: string;
+  private readonly secret: string;
 
-  constructor(options: TribeClientConfig) {
-    this.config = {
-      apiCenterUrl: options.apiCenterUrl.replace(/\/+$/, ''), // Strip trailing slash
-      serviceId: options.serviceId,
-      secret: options.secret,
-      timeout: options.timeout || 10000,
-      apiVersion: options.apiVersion || 'v1',
-    };
+  private accessToken: string | null = null;
+  private refreshToken: string | null = null;
+  private tokenExpiry: number = 0;
+
+  constructor(opts: TribeClientOptions) {
+    this.tribeId = opts.tribeId;
+    this.secret = opts.secret;
 
     this.http = axios.create({
-      baseURL: this.config.apiCenterUrl,
-      timeout: this.config.timeout,
+      baseURL: opts.gatewayUrl,
+      timeout: opts.timeout ?? 30_000,
+      headers: { 'Content-Type': 'application/json' },
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Authentication
-  // -------------------------------------------------------------------------
-
-  /**
-   * Authenticate with the API Center and obtain a JWT.
-   * The token is cached and automatically refreshed when needed.
-   */
+  // ─── Authentication ──────────────────────────────────────────────────────────
+  /** Obtain an M2M access token from the gateway */
   async authenticate(): Promise<void> {
-    const resp = await this.http.post(`/api/${this.config.apiVersion}/auth/token`, {
-      tribeId: this.config.serviceId,
-      secret: this.config.secret,
+    const res = await this.http.post('/api/v1/auth/token', {
+      tribeId: this.tribeId,
+      secret: this.secret,
     });
 
-    this.tokenData = {
-      accessToken: resp.data.data.accessToken,
-      expiresIn: resp.data.data.expiresIn,
-      obtainedAt: Date.now(),
-    };
+    const data = res.data?.data;
+    this.accessToken = data.accessToken;
+    this.refreshToken = data.refreshToken ?? null;
+    this.tokenExpiry = Date.now() + (data.expiresIn ?? 3_600) * 1_000;
   }
 
-  /**
-   * Get a valid access token, refreshing if necessary.
-   * Tokens are refreshed when they have less than 60 seconds remaining.
-   */
-  private async getToken(): Promise<string> {
-    if (!this.tokenData) {
-      await this.authenticate();
+  /** Refresh using the stored refresh token */
+  async refresh(): Promise<void> {
+    if (!this.refreshToken) {
+      return this.authenticate();
     }
 
-    // Check if token is about to expire (60s buffer)
-    const elapsed = (Date.now() - this.tokenData!.obtainedAt) / 1000;
-    if (elapsed >= this.tokenData!.expiresIn - 60) {
-      await this.authenticate();
+    try {
+      const res = await this.http.post('/api/v1/auth/token/refresh', {
+        refreshToken: this.refreshToken,
+      });
+
+      const data = res.data?.data;
+      this.accessToken = data.accessToken;
+      this.refreshToken = data.refreshToken ?? this.refreshToken;
+      this.tokenExpiry = Date.now() + (data.expiresIn ?? 3_600) * 1_000;
+    } catch {
+      // If refresh fails, fall back to full auth
+      return this.authenticate();
     }
-
-    return this.tokenData!.accessToken;
   }
 
-  /**
-   * Build an authenticated request config with the Bearer token.
-   */
-  private async authHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
-    const token = await this.getToken();
-    return {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...extra,
-    };
+  /** Ensure a valid access token is available (auto-refresh) */
+  private async ensureAuth(): Promise<void> {
+    if (!this.accessToken || Date.now() >= this.tokenExpiry - 30_000) {
+      if (this.refreshToken) {
+        await this.refresh();
+      } else {
+        await this.authenticate();
+      }
+    }
   }
 
-  // -------------------------------------------------------------------------
-  // Inter-Service Calls (Loopback)
-  // -------------------------------------------------------------------------
-
+  // ─── Service Calls ───────────────────────────────────────────────────────────
   /**
-   * Call another service through the API Center (loopback pattern).
-   * The request goes: this service → API Center → target service.
+   * Call a registered tribe service through the gateway proxy.
    *
-   * @param targetServiceId — The service ID to call (e.g., 'analytics-service')
-   * @param path            — The path on the target service (e.g., '/reports/daily')
-   * @param options         — HTTP method, body, params, headers
-   * @returns The response data from the target service
-   *
-   * @example
-   *   const users = await client.call('campusone', '/users');
-   *   const result = await client.call('payment-service', '/charge', {
-   *     method: 'POST',
-   *     data: { amount: 100, currency: 'PHP' },
-   *   });
+   * @param serviceId  - The target service identifier (e.g. 'user-service')
+   * @param path       - The downstream path  (e.g. '/users/123')
+   * @param options    - Optional Axios request config overrides
    */
-  async call<T = unknown>(targetServiceId: string, path: string, options: CallOptions = {}): Promise<T> {
-    const { method = 'GET', data, params, headers: extraHeaders } = options;
-    const headers = await this.authHeaders(extraHeaders);
+  async callService(serviceId: string, path: string, options?: AxiosRequestConfig) {
+    await this.ensureAuth();
 
-    const url = `/api/${this.config.apiVersion}/tribes/${targetServiceId}${path}`;
-
-    const axiosConfig: AxiosRequestConfig = {
-      method,
-      url,
-      headers,
-      data,
-      params,
-    };
-
-    const resp: AxiosResponse = await this.http.request(axiosConfig);
-    return resp.data;
-  }
-
-  // -------------------------------------------------------------------------
-  // External API Calls
-  // -------------------------------------------------------------------------
-
-  /**
-   * Call an external API through the API Center.
-   * The API Center holds all third-party credentials.
-   *
-   * @param apiName — The external API name (e.g., 'geolocation', 'payment')
-   * @param path    — The path on the external API (e.g., '/geocode')
-   * @param options — HTTP method, body, params
-   * @returns The response data from the external API
-   *
-   * @example
-   *   const geo = await client.callExternal('geolocation', '/geocode', {
-   *     params: { address: '123 Main St' },
-   *   });
-   */
-  async callExternal<T = unknown>(apiName: string, path: string, options: CallOptions = {}): Promise<T> {
-    const { method = 'GET', data, params, headers: extraHeaders } = options;
-    const headers = await this.authHeaders(extraHeaders);
-
-    const url = `/api/${this.config.apiVersion}/external/${apiName}${path}`;
-
-    const axiosConfig: AxiosRequestConfig = {
-      method,
-      url,
-      headers,
-      data,
-      params,
-    };
-
-    const resp: AxiosResponse = await this.http.request(axiosConfig);
-    return resp.data;
-  }
-
-  // -------------------------------------------------------------------------
-  // Service Discovery
-  // -------------------------------------------------------------------------
-
-  /**
-   * List all services registered in the API Center.
-   * Requires a valid JWT (the service must be authenticated).
-   */
-  async listServices<T = unknown>(): Promise<T> {
-    const headers = await this.authHeaders();
-
-    const resp = await this.http.get(`/api/${this.config.apiVersion}/tribes`, { headers });
-    return resp.data;
-  }
-
-  // -------------------------------------------------------------------------
-  // Self-Registration
-  // -------------------------------------------------------------------------
-
-  /**
-   * Register this service with the API Center's Dynamic Service Registry.
-   * Requires the Platform Admin secret (NOT the service's own JWT).
-   *
-   * This is typically called during the service's startup sequence or
-   * from a CI/CD pipeline after deployment.
-   *
-   * @param manifest     — The service manifest (what this service exposes, consumes, etc.)
-   * @param adminSecret  — The PLATFORM_ADMIN_SECRET for registry access
-   *
-   * @example
-   *   await client.register({
-   *     serviceId: 'campusone',
-   *     name: 'CampusOne',
-   *     baseUrl: 'http://campusone-service:4001',
-   *     requiredScopes: ['read:users', 'write:users'],
-   *     exposes: ['/users', '/courses', '/enrolments'],
-   *     consumes: ['analytics-service', 'notification-service'],
-   *     healthCheck: '/health',
-   *     version: '2.1.0',
-   *   }, process.env.PLATFORM_ADMIN_SECRET!);
-   */
-  async register<T = unknown>(manifest: ServiceManifestInput, adminSecret: string): Promise<T> {
-    const resp = await this.http.post(
-      `/api/${this.config.apiVersion}/registry/register`,
-      manifest,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Platform-Secret': adminSecret,
-        },
+    const res = await this.http.request({
+      ...options,
+      method: options?.method ?? 'GET',
+      url: `/api/v1/tribes/${serviceId}${path}`,
+      headers: {
+        ...(options?.headers ?? {}),
+        Authorization: `Bearer ${this.accessToken}`,
       },
-    );
-    return resp.data;
+    });
+
+    return res.data;
+  }
+
+  /**
+   * Call an external API through the gateway proxy.
+   *
+   * @param apiName  - External API name (e.g. 'geolocation')
+   * @param path     - The downstream path (e.g. '/lookup?ip=8.8.8.8')
+   * @param options  - Optional Axios request config overrides
+   */
+  async callExternal(apiName: string, path: string, options?: AxiosRequestConfig) {
+    await this.ensureAuth();
+
+    const res = await this.http.request({
+      ...options,
+      method: options?.method ?? 'GET',
+      url: `/api/v1/external/${apiName}${path}`,
+      headers: {
+        ...(options?.headers ?? {}),
+        Authorization: `Bearer ${this.accessToken}`,
+      },
+    });
+
+    return res.data;
+  }
+
+  // ─── Utilities ───────────────────────────────────────────────────────────────
+  /** List all services visible to the current tribe */
+  async listServices() {
+    await this.ensureAuth();
+    const res = await this.http.get('/api/v1/tribes', {
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+    return res.data;
+  }
+
+  /** Get current access token (for manual use) */
+  getAccessToken(): string | null {
+    return this.accessToken;
   }
 }
-
-// Default export for convenience
-export default TribeClient;

@@ -1,21 +1,17 @@
 // =============================================================================
-// src/external/apis/sms.ts — SMS Service API configuration
-// =============================================================================
-// Defines the external SMS API. Provides:
-//  - Send single and bulk SMS messages
-//  - Delivery status tracking
-//  - OTP (One-Time Password) verification
-//
-// The API Center holds the SMS API key; tribes only specify the recipient
-// and message content.
+// src/external/apis/sms.ts — SMS API Configuration
 // =============================================================================
 
 import { ExternalApiConfig } from '../../types';
 
 export const smsApi: ExternalApiConfig = {
-  baseUrl: process.env.EXT_SMS_URL || 'https://api.sms-provider.com',
-  authType: 'api-key',
-  headerName: 'X-API-Key',
-  tokenEnvKey: 'EXT_SMS_API_KEY',
-  description: 'SMS services: send messages, delivery tracking, OTP verification',
+  name: 'sms',
+  displayName: 'SMS Service',
+  baseUrl: process.env.SMS_API_URL || 'https://api.twilio.com/2010-04-01',
+  authType: 'basic',
+  authHeader: 'Authorization',
+  authValue: process.env.SMS_API_KEY || '',
+  timeout: 15_000,
+  rateLimit: { windowMs: 60_000, max: 100 },
+  healthEndpoint: '/',
 };

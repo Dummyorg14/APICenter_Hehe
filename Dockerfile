@@ -30,8 +30,8 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-# Copy source and compile TypeScript
-COPY tsconfig.json ./
+# Copy source and compile TypeScript (NestJS uses nest build)
+COPY tsconfig.json nest-cli.json ./
 COPY src/ ./src/
 RUN npm run build
 
@@ -64,6 +64,6 @@ USER appuser
 EXPOSE 3000
 
 # Use dumb-init as PID 1 to properly forward signals (SIGTERM, SIGINT)
-# This enables the graceful shutdown code in src/index.ts to work correctly
+# This enables NestJS enableShutdownHooks() to work correctly inside Docker
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/main.js"]
