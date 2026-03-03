@@ -12,6 +12,7 @@ import { CorrelationIdInterceptor } from './interceptors/correlation-id.intercep
 import { AuditLogInterceptor } from './interceptors/audit-log.interceptor';
 import { SecurityMiddleware } from './middleware/security.middleware';
 import { MorganMiddleware } from './middleware/morgan.middleware';
+import { RedisThrottlerStorage } from './redis-throttler-storage';
 
 @Global()
 @Module({
@@ -22,6 +23,7 @@ import { MorganMiddleware } from './middleware/morgan.middleware';
     AuditLogInterceptor,
     SecurityMiddleware,
     MorganMiddleware,
+    RedisThrottlerStorage,
   ],
   exports: [
     LoggerService,
@@ -30,6 +32,7 @@ import { MorganMiddleware } from './middleware/morgan.middleware';
     AuditLogInterceptor,
     SecurityMiddleware,
     MorganMiddleware,
+    RedisThrottlerStorage,
   ],
 })
 export class SharedModule {}

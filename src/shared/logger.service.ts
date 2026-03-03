@@ -12,41 +12,46 @@
 
 import { Injectable, LoggerService as NestLoggerService } from '@nestjs/common';
 import winston from 'winston';
+import { ConfigService } from '../config/config.service';
 
 // ---------------------------------------------------------------------------
 // Custom format: adds service name and environment to every log entry
 // ---------------------------------------------------------------------------
-const baseFormat = winston.format.combine(
-  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
-  winston.format.errors({ stack: true }),
-  winston.format((info) => {
-    info.service = 'api-center';
-    info.environment = process.env.NODE_ENV || 'development';
-    return info;
-  })(),
-);
+const buildBaseFormat = (environment: string) =>
+  winston.format.combine(
+    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
+    winston.format.errors({ stack: true }),
+    winston.format((info) => {
+      info.service = 'api-center';
+      info.environment = environment;
+      return info;
+    })(),
+  );
 
-const devFormat = winston.format.combine(
-  baseFormat,
-  winston.format.colorize(),
-  winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
-    const metaStr = Object.keys(meta).length > 1 ? ` ${JSON.stringify(meta)}` : '';
-    return `${timestamp} [${service}] ${level}: ${message}${metaStr}`;
-  }),
-);
+const buildDevFormat = (environment: string) =>
+  winston.format.combine(
+    buildBaseFormat(environment),
+    winston.format.colorize(),
+    winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
+      const metaStr = Object.keys(meta).length > 1 ? ` ${JSON.stringify(meta)}` : '';
+      return `${timestamp} [${service}] ${level}: ${message}${metaStr}`;
+    }),
+  );
 
-const prodFormat = winston.format.combine(baseFormat, winston.format.json());
-
-const isProduction = process.env.NODE_ENV === 'production';
+const buildProdFormat = (environment: string) =>
+  winston.format.combine(buildBaseFormat(environment), winston.format.json());
 
 @Injectable()
 export class LoggerService implements NestLoggerService {
   private readonly winstonLogger: winston.Logger;
 
-  constructor() {
+  constructor(private readonly config: ConfigService) {
+    const isProduction = this.config.isProduction;
+    const environment = this.config.nodeEnv;
+
     this.winstonLogger = winston.createLogger({
       level: isProduction ? 'info' : 'debug',
-      format: isProduction ? prodFormat : devFormat,
+      format: isProduction ? buildProdFormat(environment) : buildDevFormat(environment),
       defaultMeta: { service: 'api-center' },
       transports: [
         new winston.transports.Console(),

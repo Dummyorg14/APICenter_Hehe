@@ -1,15 +1,12 @@
 // =============================================================================
-// src/tribes/tribes.controller.ts — Dynamic Service Proxy Controller (Tribes)
+// src/shared-services/shared-services.controller.ts — Shared Platform Services Proxy
 // =============================================================================
-// NestJS controller that proxies requests to registered tribe backend services.
-// Only routes to services with serviceType: 'tribe' (the default).
+// Routes /api/v1/shared/:serviceId/* to platform-owned shared services
+// (e.g., payment, email, SMS) that are registered via the service registry
+// with serviceType: 'shared'.
 //
-// Uses the shared ProxyHandler utility which is also used by
-// SharedServicesController for /shared/* routes.
-//
-// ENDPOINTS:
-//  GET /api/v1/tribes           — List available tribe services
-//  ALL /api/v1/tribes/:target/* — Proxy to registered upstream service
+// Uses the same ProxyHandler utility as TribesController to avoid duplication
+// of proxy creation, lifecycle gating, scope checking, and metrics recording.
 // =============================================================================
 
 import {
@@ -31,9 +28,9 @@ import { MetricsService } from '../metrics/metrics.service';
 import { ProxyHandler } from '../shared/proxy-handler';
 import { AuthenticatedRequest } from '../types';
 
-@Controller('tribes')
+@Controller('shared')
 @UseGuards(DescopeAuthGuard)
-export class TribesController implements OnModuleDestroy {
+export class SharedServicesController implements OnModuleDestroy {
   private readonly handler: ProxyHandler;
 
   constructor(
@@ -44,7 +41,7 @@ export class TribesController implements OnModuleDestroy {
   ) {
     this.handler = new ProxyHandler(
       { registry, descope, logger, metrics },
-      { namespace: 'tribe', pathPrefix: '/api/v1/tribes' },
+      { namespace: 'shared', pathPrefix: '/api/v1/shared' },
     );
   }
 
@@ -52,9 +49,9 @@ export class TribesController implements OnModuleDestroy {
     this.handler.destroy();
   }
 
-  // ─── List available tribe services ───────────────────────────────────────────
+  // ─── List shared platform services ───────────────────────────────────────────
   @Get()
-  listServices(@Req() req: AuthenticatedRequest) {
+  listSharedServices(@Req() req: AuthenticatedRequest) {
     const tribeId = req.tribeId;
     const services = this.handler.listServices(tribeId);
 
@@ -64,20 +61,20 @@ export class TribesController implements OnModuleDestroy {
       meta: {
         total: services.length,
         tribeId,
-        namespace: 'tribe',
+        namespace: 'shared',
         timestamp: new Date().toISOString(),
         correlationId: req.correlationId,
       },
     };
   }
 
-  // ─── Dynamic Proxy ───────────────────────────────────────────────────────────
-  @All(':targetServiceId/*')
+  // ─── Dynamic Proxy to shared services ────────────────────────────────────────
+  @All(':serviceId/*')
   async proxy(
-    @Param('targetServiceId') targetServiceId: string,
+    @Param('serviceId') serviceId: string,
     @Req() req: AuthenticatedRequest,
     @Res() res: Response,
   ) {
-    await this.handler.proxyRequest(targetServiceId, req, res);
+    await this.handler.proxyRequest(serviceId, req, res);
   }
 }

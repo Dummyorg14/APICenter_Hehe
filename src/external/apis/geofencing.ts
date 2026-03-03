@@ -3,15 +3,18 @@
 // =============================================================================
 
 import { ExternalApiConfig } from '../../types';
+import { ConfigService } from '../../config/config.service';
 
-export const geofencingApi: ExternalApiConfig = {
-  name: 'geofencing',
-  displayName: 'Geofencing API',
-  baseUrl: process.env.GEOFENCING_API_URL || 'https://api.geofencing.example.com',
-  authType: 'bearer',
-  authHeader: 'Authorization',
-  authValue: process.env.GEOFENCING_API_KEY || '',
-  timeout: 10_000,
-  rateLimit: { windowMs: 60_000, max: 50 },
-  healthEndpoint: '/health',
-};
+export function createGeofencingApi(config: ConfigService): ExternalApiConfig {
+  return {
+    name: 'geofencing',
+    displayName: 'Geofencing API',
+    baseUrl: config.external.geofencing.url,
+    authType: 'bearer',
+    authHeader: 'Authorization',
+    authValue: config.external.geofencing.key,
+    timeout: 10_000,
+    rateLimit: { windowMs: 60_000, max: 50 },
+    healthEndpoint: '/health',
+  };
+}

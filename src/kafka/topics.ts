@@ -13,18 +13,11 @@ export const TOPICS = {
   GATEWAY_ERROR: 'api-center.gateway.error',
 
   // ---- Tribe-to-tribe communication ----
-  TRIBE_EVENT: 'api-center.tribe.event',
   TRIBE_REQUEST: 'api-center.tribe.request',
   TRIBE_RESPONSE: 'api-center.tribe.response',
 
   // ---- External API events ----
   EXTERNAL_REQUEST: 'api-center.external.request',
-  EXTERNAL_RESPONSE: 'api-center.external.response',
-  EXTERNAL_WEBHOOK: 'api-center.external.webhook',
-
-  // ---- Authentication events ----
-  TOKEN_ISSUED: 'api-center.auth.token-issued',
-  TOKEN_REVOKED: 'api-center.auth.token-revoked',
 
   // ---- Audit / Observability ----
   AUDIT_LOG: 'api-center.audit.log',
@@ -35,6 +28,18 @@ export const TOPICS = {
   SERVICE_DEPRECATED: 'api-center.registry.service-deprecated',
   SERVICE_RETIRED: 'api-center.registry.service-retired',
   SERVICE_VERSION_CHANGED: 'api-center.registry.service-version-changed',
+
+  // ---- Reserved (not yet implemented — kept for future use) ----
+  /** @reserved Cross-tribe pub/sub events (planned) */
+  TRIBE_EVENT: 'api-center.tribe.event',
+  /** @reserved External API response logging (planned) */
+  EXTERNAL_RESPONSE: 'api-center.external.response',
+  /** @reserved Inbound webhook forwarding (planned) */
+  EXTERNAL_WEBHOOK: 'api-center.external.webhook',
+  /** @reserved Auth lifecycle events (planned) */
+  TOKEN_ISSUED: 'api-center.auth.token-issued',
+  /** @reserved Auth lifecycle events (planned) */
+  TOKEN_REVOKED: 'api-center.auth.token-revoked',
 } as const;
 
 export type TopicName = (typeof TOPICS)[keyof typeof TOPICS];

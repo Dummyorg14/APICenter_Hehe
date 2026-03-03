@@ -104,4 +104,13 @@ export class ServiceManifestDto {
   })
   @IsOptional()
   replacementService?: string;
+
+  // ── Routing namespace ──────────────────────────────────────────────────────
+
+  @IsString()
+  @IsIn(['shared', 'tribe'], {
+    message: 'serviceType must be either shared or tribe',
+  })
+  @IsOptional()
+  serviceType?: string = 'tribe';
 }

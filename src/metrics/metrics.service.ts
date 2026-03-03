@@ -26,7 +26,12 @@ export class MetricsService implements OnModuleInit {
   readonly registryServicesTotal: Gauge;
 
   // ---- Showback / Usage Metrics ----
+  readonly proxyRequestsTotal: Counter;
+  readonly proxyRequestDuration: Histogram;
+
+  /** @deprecated Use proxyRequestsTotal — kept as alias for backwards compat */
   readonly tribeRequestsTotal: Counter;
+  /** @deprecated Use proxyRequestDuration — kept as alias for backwards compat */
   readonly tribeRequestDuration: Histogram;
 
   constructor() {
@@ -54,18 +59,22 @@ export class MetricsService implements OnModuleInit {
       help: 'Total number of registered services in the registry',
     });
 
-    this.tribeRequestsTotal = new Counter({
-      name: 'tribe_requests_total',
-      help: 'Total cross-tribe proxy requests (for showback attribution)',
-      labelNames: ['source_tribe', 'target_service', 'method', 'status_code'] as const,
+    this.proxyRequestsTotal = new Counter({
+      name: 'proxy_requests_total',
+      help: 'Total proxy requests for showback attribution (shared + tribe)',
+      labelNames: ['namespace', 'source_tribe', 'target_service', 'method', 'status_code'] as const,
     });
 
-    this.tribeRequestDuration = new Histogram({
-      name: 'tribe_request_duration_seconds',
-      help: 'Cross-tribe proxy request duration in seconds (for showback)',
-      labelNames: ['source_tribe', 'target_service'] as const,
+    this.proxyRequestDuration = new Histogram({
+      name: 'proxy_request_duration_seconds',
+      help: 'Proxy request duration in seconds for showback attribution',
+      labelNames: ['namespace', 'source_tribe', 'target_service'] as const,
       buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
     });
+
+    // Backwards-compat aliases
+    this.tribeRequestsTotal = this.proxyRequestsTotal;
+    this.tribeRequestDuration = this.proxyRequestDuration;
   }
 
   onModuleInit() {
@@ -101,7 +110,31 @@ export class MetricsService implements OnModuleInit {
   }
 
   /**
-   * Record a cross-tribe proxy request for showback attribution.
+   * Record a proxy request for showback attribution (works for both namespaces).
+   */
+  recordProxyRequest(
+    namespace: string,
+    sourceTribe: string,
+    targetService: string,
+    method: string,
+    statusCode: number,
+    durationSec: number,
+  ) {
+    this.proxyRequestsTotal.inc({
+      namespace,
+      source_tribe: sourceTribe,
+      target_service: targetService,
+      method,
+      status_code: String(statusCode),
+    });
+    this.proxyRequestDuration.observe(
+      { namespace, source_tribe: sourceTribe, target_service: targetService },
+      durationSec,
+    );
+  }
+
+  /**
+   * @deprecated Use recordProxyRequest — kept for backwards compatibility.
    */
   recordTribeRequest(
     sourceTribe: string,
@@ -110,15 +143,6 @@ export class MetricsService implements OnModuleInit {
     statusCode: number,
     durationSec: number,
   ) {
-    this.tribeRequestsTotal.inc({
-      source_tribe: sourceTribe,
-      target_service: targetService,
-      method,
-      status_code: String(statusCode),
-    });
-    this.tribeRequestDuration.observe(
-      { source_tribe: sourceTribe, target_service: targetService },
-      durationSec,
-    );
+    this.recordProxyRequest('tribe', sourceTribe, targetService, method, statusCode, durationSec);
   }
 }

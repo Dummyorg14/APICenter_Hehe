@@ -18,25 +18,26 @@ import { MetricsService } from '../metrics/metrics.service';
 import { CircuitBreaker, CircuitState } from '../shared/circuit-breaker';
 import { BadGatewayError, NotFoundError, ServiceUnavailableError } from '../shared/errors';
 import { ExternalApiConfig, ExternalApiConfigMap, ExternalCallOptions } from '../types';
-import { externalApis } from './apis';
+import { buildExternalApis } from './apis';
 import { TOPICS } from '../kafka/topics';
 
 @Injectable()
 export class ExternalService implements OnModuleInit {
   private readonly clients = new Map<string, AxiosInstance>();
   private readonly breakers = new Map<string, CircuitBreaker>();
-  private readonly apis: ExternalApiConfigMap;
+  private apis!: ExternalApiConfigMap;
 
   constructor(
     private readonly config: ConfigService,
     private readonly logger: LoggerService,
     private readonly kafka: KafkaService,
     private readonly metrics: MetricsService,
-  ) {
-    this.apis = externalApis;
-  }
+  ) {}
 
   onModuleInit() {
+    // Build API configs from centralised ConfigService (no direct process.env)
+    this.apis = buildExternalApis(this.config);
+
     for (const [name, cfg] of Object.entries(this.apis)) {
       this.initClient(name, cfg);
     }
@@ -118,7 +119,12 @@ export class ExternalService implements OnModuleInit {
             duration,
             timestamp: new Date().toISOString(),
           })
-          .catch(() => {});
+          .catch((err) => {
+            this.logger.warn(
+              `Kafka publish failed for ${TOPICS.EXTERNAL_REQUEST}: ${(err as Error).message}`,
+              'ExternalService',
+            );
+          });
 
         return {
           status: resp.status,
@@ -172,7 +178,12 @@ export class ExternalService implements OnModuleInit {
               previousState: from,
               timestamp: new Date().toISOString(),
             })
-            .catch(() => {});
+            .catch((err) => {
+              this.logger.warn(
+                `Kafka publish failed for ${TOPICS.GATEWAY_ERROR}: ${(err as Error).message}`,
+                'ExternalService',
+              );
+            });
         } else if (to === CircuitState.CLOSED) {
           this.kafka
             .publish(TOPICS.GATEWAY_RESPONSE, {
@@ -181,7 +192,12 @@ export class ExternalService implements OnModuleInit {
               previousState: from,
               timestamp: new Date().toISOString(),
             })
-            .catch(() => {});
+            .catch((err) => {
+              this.logger.warn(
+                `Kafka publish failed for ${TOPICS.GATEWAY_RESPONSE}: ${(err as Error).message}`,
+                'ExternalService',
+              );
+            });
         }
       },
     });

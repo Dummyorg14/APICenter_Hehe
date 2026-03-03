@@ -24,24 +24,29 @@ import { AuthModule } from './auth/auth.module';
 import { RegistryModule } from './registry/registry.module';
 import { TribesModule } from './tribes/tribes.module';
 import { ExternalModule } from './external/external.module';
+import { SharedServicesModule } from './shared-services/shared-services.module';
 import { HealthModule } from './health/health.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { SecurityMiddleware } from './shared/middleware/security.middleware';
 import { MorganMiddleware } from './shared/middleware/morgan.middleware';
+import { RedisThrottlerStorage } from './shared/redis-throttler-storage';
 
 @Module({
   imports: [
     // ---- Configuration (loaded first) ----
     ConfigModule,
 
-    // ---- Rate Limiting (global) ----
+    // ---- Rate Limiting (global — Redis-backed for distributed deployments) ----
     ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ([{
-        ttl: config.rateLimit.windowMs,
-        limit: config.rateLimit.max,
-      }]),
+      imports: [ConfigModule, SharedModule],
+      inject: [ConfigService, RedisThrottlerStorage],
+      useFactory: (config: ConfigService, storage: RedisThrottlerStorage) => ({
+        throttlers: [{
+          ttl: config.rateLimit.windowMs,
+          limit: config.rateLimit.max,
+        }],
+        storage,
+      }),
     }),
 
     // ---- Shared utilities (logger, errors, validators) ----
@@ -55,6 +60,7 @@ import { MorganMiddleware } from './shared/middleware/morgan.middleware';
     AuthModule,
     RegistryModule,
     TribesModule,
+    SharedServicesModule,
     ExternalModule,
     HealthModule,
   ],

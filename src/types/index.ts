@@ -67,6 +67,9 @@ export type ServiceLifecycleStatus =
   | 'deprecated'    // Still live but consumers should migrate
   | 'retired';      // No longer routable — kept for audit history
 
+/** Routing namespace: shared = platform service, tribe = tribe backend */
+export type ServiceType = 'shared' | 'tribe';
+
 /**
  * A service manifest is what a tribe/service sends when registering
  * with the API Center via POST /api/v1/registry/register.
@@ -78,6 +81,8 @@ export interface ServiceManifest {
   requiredScopes: string[];
   exposes: string[];
   consumes: string[];
+  /** Routing namespace — 'shared' for platform services, 'tribe' for tribe backends. Defaults to 'tribe'. */
+  serviceType?: ServiceType;
   healthCheck?: string;
   version?: string;
   description?: string;

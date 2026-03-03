@@ -24,12 +24,16 @@ import {
 import { Request, Response } from 'express';
 import { AppError } from '../errors';
 import { LoggerService } from '../logger.service';
+import { ConfigService } from '../../config/config.service';
 import { AuthenticatedRequest } from '../../types';
 
 @Injectable()
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
-  constructor(private readonly logger: LoggerService) {}
+  constructor(
+    private readonly logger: LoggerService,
+    private readonly config: ConfigService,
+  ) {}
 
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
@@ -89,10 +93,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
       success: false,
       error: {
         code: 'INTERNAL_ERROR',
-        message: process.env.NODE_ENV === 'production'
+        message: this.config.isProduction
           ? 'An unexpected error occurred'
           : err?.message || 'Internal server error',
-        ...(process.env.NODE_ENV === 'development' && { stack: err?.stack }),
+        ...(!this.config.isProduction && { stack: err?.stack }),
       },
       meta: { timestamp: new Date().toISOString(), correlationId },
     });

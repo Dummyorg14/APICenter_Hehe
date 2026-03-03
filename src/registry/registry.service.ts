@@ -19,6 +19,7 @@ import {
   ServiceManifest,
   ServiceRegistryEntry,
   ServiceRegistryMap,
+  ServiceType,
 } from '../types';
 import { LoggerService } from '../shared/logger.service';
 import { ConfigService } from '../config/config.service';
@@ -103,6 +104,7 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
 
     const entry: ServiceRegistryEntry = {
       ...manifest,
+      serviceType: manifest.serviceType || 'tribe',
       registeredAt: existing?.registeredAt || now,
       updatedAt: now,
       status: existing?.status === 'deprecated' ? 'deprecated' : 'active',
@@ -128,10 +130,16 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
         name: manifest.name,
         baseUrl: manifest.baseUrl,
         exposes: manifest.exposes,
+        serviceType: entry.serviceType,
         isUpdate: !!existing,
         timestamp: now,
       })
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.warn(
+          `Kafka publish failed for ${TOPICS.SERVICE_REGISTERED}: ${(err as Error).message}`,
+          'RegistryService',
+        );
+      });
 
     if (previousVersion && previousVersion !== manifest.version) {
       this.kafka
@@ -141,7 +149,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
           newVersion: manifest.version,
           timestamp: now,
         })
-        .catch(() => {});
+        .catch((err) => {
+          this.logger.warn(
+            `Kafka publish failed for ${TOPICS.SERVICE_VERSION_CHANGED}: ${(err as Error).message}`,
+            'RegistryService',
+          );
+        });
     }
 
     this.logger.info('Service registered', {
@@ -183,7 +196,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
         serviceId,
         timestamp: new Date().toISOString(),
       })
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.warn(
+          `Kafka publish failed for ${TOPICS.SERVICE_DEREGISTERED}: ${(err as Error).message}`,
+          'RegistryService',
+        );
+      });
 
     this.logger.info('Service deregistered', { serviceId });
   }
@@ -210,7 +228,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
     if (sunsetDate) entry.sunsetDate = sunsetDate;
     if (replacementService) entry.replacementService = replacementService;
 
-    this.persistToRedis(serviceId, entry).catch(() => {});
+    this.persistToRedis(serviceId, entry).catch((err) => {
+      this.logger.warn(
+        `Redis persist failed for deprecated service '${serviceId}': ${(err as Error).message}`,
+        'RegistryService',
+      );
+    });
 
     this.kafka
       .publish(TOPICS.SERVICE_DEPRECATED, {
@@ -219,7 +242,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
         replacementService: entry.replacementService,
         timestamp: entry.updatedAt,
       })
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.warn(
+          `Kafka publish failed for ${TOPICS.SERVICE_DEPRECATED}: ${(err as Error).message}`,
+          'RegistryService',
+        );
+      });
 
     this.logger.warn(
       `Service '${serviceId}' deprecated (sunset: ${sunsetDate || 'unset'}, replacement: ${replacementService || 'none'})`,
@@ -242,7 +270,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
     entry.status = 'retired';
     entry.updatedAt = new Date().toISOString();
 
-    this.persistToRedis(serviceId, entry).catch(() => {});
+    this.persistToRedis(serviceId, entry).catch((err) => {
+      this.logger.warn(
+        `Redis persist failed for retired service '${serviceId}': ${(err as Error).message}`,
+        'RegistryService',
+      );
+    });
     this.syncMetricsGauge();
 
     this.kafka
@@ -250,7 +283,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
         serviceId,
         timestamp: entry.updatedAt,
       })
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.warn(
+          `Kafka publish failed for ${TOPICS.SERVICE_RETIRED}: ${(err as Error).message}`,
+          'RegistryService',
+        );
+      });
 
     this.logger.warn(`Service '${serviceId}' retired — no longer routable`, 'RegistryService');
 
@@ -276,7 +314,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
     entry.sunsetDate = undefined;
     entry.replacementService = undefined;
 
-    this.persistToRedis(serviceId, entry).catch(() => {});
+    this.persistToRedis(serviceId, entry).catch((err) => {
+      this.logger.warn(
+        `Redis persist failed for activated service '${serviceId}': ${(err as Error).message}`,
+        'RegistryService',
+      );
+    });
     this.syncMetricsGauge();
 
     this.logger.info(`Service '${serviceId}' activated`, {});
@@ -311,6 +354,16 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
 
   getAll(): ServiceRegistryMap {
     return { ...this.services };
+  }
+
+  /**
+   * Return all entries filtered by serviceType ('shared' or 'tribe').
+   * Services without an explicit serviceType default to 'tribe'.
+   */
+  getByType(type: ServiceType): ServiceRegistryEntry[] {
+    return Object.values(this.services).filter(
+      (svc) => (svc.serviceType ?? 'tribe') === type,
+    );
   }
 
   count(): number {

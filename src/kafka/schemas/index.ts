@@ -10,6 +10,7 @@ export { GatewayRequestEventSchema } from './gateway.schemas';
 export { GatewayResponseEventSchema } from './gateway.schemas';
 export { GatewayErrorEventSchema } from './gateway.schemas';
 export { AuditLogEventSchema } from './audit.schemas';
+export { ExternalRequestEventSchema } from './external.schemas';
 export {
   RegistryServiceRegisteredEventSchema,
   RegistryServiceDeregisteredEventSchema,
@@ -22,6 +23,7 @@ export { TribeRequestEventSchema, TribeResponseEventSchema } from './tribe.schem
 // Re-export inferred types
 export type { GatewayRequestEvent, GatewayResponseEvent, GatewayErrorEvent } from './gateway.schemas';
 export type { AuditLogEvent as AuditLogKafkaEvent } from './audit.schemas';
+export type { ExternalRequestEvent } from './external.schemas';
 export type {
   RegistryServiceRegisteredEvent,
   RegistryServiceDeregisteredEvent,

@@ -22,6 +22,7 @@ import { ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { LoggerService } from './shared/logger.service';
+import { ConfigService } from './config/config.service';
 import { AllExceptionsFilter } from './shared/filters/all-exceptions.filter';
 import { CorrelationIdInterceptor } from './shared/interceptors/correlation-id.interceptor';
 import { AuditLogInterceptor } from './shared/interceptors/audit-log.interceptor';
@@ -34,6 +35,7 @@ async function bootstrap() {
 
   // Use our Winston-based logger for all NestJS internal logging
   const logger = app.get(LoggerService);
+  const config = app.get(ConfigService);
   app.useLogger(logger);
 
   // ---------------------------------------------------------------------------
@@ -41,9 +43,7 @@ async function bootstrap() {
   // ---------------------------------------------------------------------------
   app.use(helmet());                         // Security HTTP headers
   app.enableCors({
-    origin: process.env.ALLOWED_ORIGINS
-      ? process.env.ALLOWED_ORIGINS.split(',')
-      : '*',
+    origin: config.allowedOrigins,
     credentials: true,
   });
 
@@ -84,11 +84,11 @@ async function bootstrap() {
   // ---------------------------------------------------------------------------
   // Start the server
   // ---------------------------------------------------------------------------
-  const port = process.env.PORT || 3000;
+  const port = config.port;
   await app.listen(port);
 
   logger.log(`API Center running on port ${port}`, 'Bootstrap');
-  logger.log(`Environment: ${process.env.NODE_ENV || 'development'}`, 'Bootstrap');
+  logger.log(`Environment: ${config.nodeEnv}`, 'Bootstrap');
   logger.log('Mode: dynamic-service-registry (NestJS)', 'Bootstrap');
 }
 

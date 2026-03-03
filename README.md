@@ -35,13 +35,18 @@
 
 ## Overview
 
-**API Center** is a production-grade API gateway that acts as the single front-door for a microservice ecosystem. Instead of hard-coding service routes, services **register themselves** dynamically at boot time. The gateway then:
+**API Center** is a production-grade API gateway that acts as the single front-door for a microservice ecosystem. Instead of hard-coding service routes, services **register themselves** dynamically at boot time. The gateway routes traffic through **two namespaces**:
+
+- **`/shared/*`** — Platform-owned shared services (payment, email, SMS, etc.) registered with `serviceType: 'shared'`
+- **`/tribes/*`** — Tribe backend services registered with `serviceType: 'tribe'` (default)
+
+The gateway then:
 
 - **Authenticates** every inbound request via Descope JWT tokens
 - **Authorizes** calls using scope-based access control from the registry
-- **Proxies** traffic to the correct upstream microservice
+- **Proxies** traffic to the correct upstream microservice via the appropriate namespace
 - **Logs** every request/response as structured Kafka audit events (Zod-validated)
-- **Protects** upstream services with circuit breakers and rate limiting
+- **Protects** upstream services with circuit breakers (external 3rd-party APIs) and rate limiting
 - **Persists** the service registry in Redis so services survive gateway restarts
 - **Observes** all traffic via Prometheus metrics and Jaeger distributed traces
 - **Scales** horizontally — 3 stateless instances behind NGINX load balancer
@@ -81,9 +86,9 @@
 │                                                                   │
 │  ┌─────────────┐  ┌──────────────────────────────────────────┐   │
 │  │ HealthModule │  │     KafkaModule (KRaft — global)          │   │
-│  │ - /live      │  │  19 topics • Zod-validated • audit trail  │   │
-│  │ - /ready     │  └──────────────────────────────────────────┘   │
-│  └─────────────┘                                                  │
+│  │ - /live      │  │  11 active + 5 reserved topics            │   │
+│  │ - /ready     │  │  Zod-validated • audit trail               │   │
+│  └─────────────┘  └──────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘
         ▼              ▼              ▼           ▼           ▼
   ┌──────────┐  ┌──────────┐  ┌────────────┐┌────────┐┌─────────┐
@@ -107,7 +112,7 @@
 | **Logging** | Winston | Structured JSON logs with levels |
 | **HTTP Proxy** | http-proxy-middleware | Reverse proxy to upstream services |
 | **External APIs** | Axios + Circuit Breaker | Resilient third-party API calls |
-| **Rate Limiting** | @nestjs/throttler | Configurable request throttling |
+| **Rate Limiting** | @nestjs/throttler + Redis | Distributed request throttling (Redis-backed with in-memory fallback) |
 | **Health Checks** | @nestjs/terminus | Liveness & readiness probes |
 | **Metrics** | @willsoto/nestjs-prometheus + prom-client | Prometheus metrics (counters, histograms, gauges) |
 | **Tracing** | OpenTelemetry + Jaeger | Distributed request tracing with correlation IDs |
@@ -130,7 +135,7 @@ src/
 ├── app.module.ts                    # Root module — imports all feature modules
 │
 ├── config/
-│   ├── config.service.ts            # @Injectable — all env vars in one place (split Redis URLs)
+│   ├── config.service.ts            # @Injectable — all env vars in one place, startup validation
 │   ├── config.module.ts             # @Global module
 │   └── secrets.service.ts           # AWS Secrets Manager loader (falls back to process.env)
 │
@@ -141,10 +146,13 @@ src/
 │   ├── logger.service.ts            # Winston-backed NestJS LoggerService
 │   ├── errors.ts                    # Error hierarchy extending HttpException
 │   ├── circuit-breaker.ts           # Circuit breaker with onStateChange callbacks
-│   ├── shared.module.ts             # @Global — exports Logger, filters, interceptors
+│   ├── redis-throttler-storage.ts   # Redis-backed ThrottlerStorage (in-memory fallback)
+│   ├── proxy-handler.ts             # Reusable reverse-proxy utility (shared by tribes + shared-services)
+│   ├── shared.module.ts             # @Global — exports Logger, filters, interceptors, throttler storage
 │   ├── dto/
 │   │   ├── token-request.dto.ts     # Token issuance DTO
 │   │   ├── refresh-token.dto.ts     # Token refresh DTO
+│   │   ├── deprecate-service.dto.ts # DTO for service deprecation (sunsetDate, replacementService)
 │   │   └── service-manifest.dto.ts  # Service registration DTO
 │   ├── filters/
 │   │   └── all-exceptions.filter.ts # Global exception filter (catch-all)
@@ -156,13 +164,14 @@ src/
 │       └── morgan.middleware.ts      # HTTP request logging via Morgan
 │
 ├── kafka/
-│   ├── topics.ts                    # 19 centralized topic definitions
+│   ├── topics.ts                    # 11 active + 5 reserved topic definitions
 │   ├── kafka.service.ts             # KafkaJS producer/consumer with Zod validation
 │   ├── kafka.module.ts              # @Global module
 │   └── schemas/                     # Zod schemas for every Kafka event type
 │       ├── index.ts                 # Barrel exports
 │       ├── gateway.schemas.ts       # GatewayRequest/Response/Error events
 │       ├── audit.schemas.ts         # AuditLogEvent
+│       ├── external.schemas.ts      # ExternalRequestEvent
 │       ├── registry.schemas.ts      # ServiceRegistered/Deregistered events
 │       └── tribe.schemas.ts         # TribeRequest/Response events
 │
@@ -177,7 +186,8 @@ src/
 │   ├── auth.module.ts               # Provides DescopeService + guards
 │   └── guards/
 │       ├── descope-auth.guard.ts    # CanActivate — JWT validation
-│       └── platform-admin.guard.ts  # CanActivate — X-Platform-Secret check
+│       ├── platform-admin.guard.ts  # CanActivate — X-Platform-Secret check (legacy)
+│       └── scoped-admin.guard.ts    # CanActivate — dual-mode: legacy secret OR JWT with platform:admin scope
 │
 ├── registry/
 │   ├── registry.service.ts          # In-memory + Redis-persisted service registry
@@ -185,8 +195,12 @@ src/
 │   └── registry.module.ts           # Exports RegistryService
 │
 ├── tribes/
-│   ├── tribes.controller.ts         # Dynamic reverse proxy to registered services
+│   ├── tribes.controller.ts         # Dynamic reverse proxy (namespace: tribe) via ProxyHandler
 │   └── tribes.module.ts             # Imports Auth + Registry
+│
+├── shared-services/
+│   ├── shared-services.controller.ts # Dynamic reverse proxy (namespace: shared) via ProxyHandler
+│   └── shared-services.module.ts     # Imports Auth + Registry
 │
 ├── external/
 │   ├── external.service.ts          # API manager with observable circuit breakers
@@ -196,10 +210,7 @@ src/
 │   └── apis/
 │       ├── index.ts                 # Barrel — exports all API configs
 │       ├── geolocation.ts           # IP Geolocation API config
-│       ├── geofencing.ts            # Geofencing API config
-│       ├── payment.ts               # Payment gateway config
-│       ├── sms.ts                   # SMS service config
-│       └── email.ts                 # Email service config
+│       └── geofencing.ts            # Geofencing API config
 │
 ├── health/
 │   ├── health.controller.ts         # /health/live + /health/ready (+ circuit breaker states)
@@ -249,6 +260,8 @@ npm run start:dev
 # NestJS watches for file changes and auto-reloads
 ```
 
+> **Startup validation**: `ConfigService` runs environment checks on boot. It warns on missing Descope credentials or localhost URLs in production, and **fatally exits** if `PLATFORM_ADMIN_SECRET` is missing in production mode.
+
 ### 5. Build for production
 
 ```bash
@@ -291,12 +304,6 @@ npm run start:prod
 | `EXT_GEOLOCATION_API_KEY` | No | — | Geolocation external API key |
 | `EXT_GEOFENCING_URL` | No | — | Geofencing external API base URL |
 | `EXT_GEOFENCING_API_KEY` | No | — | Geofencing external API key |
-| `EXT_PAYMENT_URL` | No | — | Payment gateway base URL |
-| `EXT_PAYMENT_TOKEN` | No | — | Payment gateway token |
-| `EXT_SMS_URL` | No | — | SMS service base URL |
-| `EXT_SMS_API_KEY` | No | — | SMS service API key |
-| `EXT_EMAIL_URL` | No | — | Email service base URL |
-| `EXT_EMAIL_TOKEN` | No | — | Email service token |
 
 ---
 
@@ -315,19 +322,26 @@ All endpoints are prefixed with `/api/v1/` unless noted otherwise.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/registry/register` | `X-Platform-Secret` | Register a service |
-| `GET` | `/registry/services` | `X-Platform-Secret` | List all services |
-| `GET` | `/registry/services/:id` | `X-Platform-Secret` | Get specific service |
-| `DELETE` | `/registry/services/:id` | `X-Platform-Secret` | Remove a service |
+| `POST` | `/registry/register` | `X-Platform-Secret` or JWT (`platform:admin`) | Register a service |
+| `GET` | `/registry/services` | `X-Platform-Secret` or JWT (`platform:admin`) | List all services |
+| `GET` | `/registry/services/:id` | `X-Platform-Secret` or JWT (`platform:admin`) | Get specific service |
+| `DELETE` | `/registry/services/:id` | `X-Platform-Secret` or JWT (`platform:admin`) | Remove a service |
 
-### Tribes — Dynamic Service Proxy
+### Tribes — Dynamic Service Proxy (namespace: `tribe`)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/tribes` | Bearer JWT | List available services |
-| `ALL` | `/tribes/:serviceId/*` | Bearer JWT | Proxy to upstream service |
+| `GET` | `/tribes` | Bearer JWT | List available tribe services |
+| `ALL` | `/tribes/:serviceId/*` | Bearer JWT | Proxy to upstream tribe service |
 
-### External APIs
+### Shared Services — Dynamic Service Proxy (namespace: `shared`)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/shared` | Bearer JWT | List available shared services |
+| `ALL` | `/shared/:serviceId/*` | Bearer JWT | Proxy to upstream shared service |
+
+### External APIs (3rd-Party — Geolocation & Geofencing only)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -338,8 +352,8 @@ All endpoints are prefixed with `/api/v1/` unless noted otherwise.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/admin/circuit-breakers` | `X-Platform-Secret` | List all circuit breaker states |
-| `POST` | `/admin/circuit-breakers/:apiName/reset` | `X-Platform-Secret` | Reset a breaker to CLOSED |
+| `GET` | `/admin/circuit-breakers` | `X-Platform-Secret` or JWT (`platform:admin`) | List all circuit breaker states |
+| `POST` | `/admin/circuit-breakers/:apiName/reset` | `X-Platform-Secret` or JWT (`platform:admin`) | Reset a breaker to CLOSED |
 
 ### Health Checks
 
@@ -370,7 +384,7 @@ API Center uses NestJS's **modular architecture** where each domain area is enca
 | `req.user` middleware | `@UseGuards(DescopeAuthGuard)` | Guards |
 | Error handler `(err, req, res, next)` | `@Catch() ExceptionFilter` | `all-exceptions.filter.ts` |
 | Zod schemas | `class-validator` DTOs | `dto/*.dto.ts` |
-| `express-rate-limit` | `@nestjs/throttler` ThrottlerGuard | `app.module.ts` |
+| `express-rate-limit` | `@nestjs/throttler` + Redis ThrottlerStorage | `app.module.ts`, `redis-throttler-storage.ts` |
 | Manual bootstrap + shutdown | `OnModuleInit` + `OnModuleDestroy` hooks | Services |
 | Correlation ID middleware | `@Injectable() NestInterceptor` | `correlation-id.interceptor.ts` |
 | Audit logger middleware | `@Injectable() NestInterceptor` | `audit-log.interceptor.ts` |
@@ -386,11 +400,13 @@ AppModule (root)
 ├── AuthModule     (guards + Descope service)
 │   └── imports RegistryModule
 ├── RegistryModule (service registry CRUD, Redis-persisted)
-├── TribesModule   (dynamic proxy)
+├── TribesModule           (dynamic proxy — namespace: tribe)
 │   └── imports AuthModule, RegistryModule
-├── ExternalModule (third-party API proxy + admin circuit breaker controller)
+├── SharedServicesModule   (dynamic proxy — namespace: shared)
+│   └── imports AuthModule, RegistryModule
+├── ExternalModule         (3rd-party API proxy + admin circuit breaker controller)
 │   └── imports AuthModule
-└── HealthModule   (liveness/readiness + circuit breaker states)
+└── HealthModule           (liveness/readiness + circuit breaker states)
     └── imports RegistryModule, ExternalModule, TerminusModule
 ```
 
@@ -409,7 +425,8 @@ AppModule (root)
 ### Guards
 
 - **`DescopeAuthGuard`** — Validates Bearer JWT via Descope SDK. Applied to `/tribes/*` and `/external/*`.
-- **`PlatformAdminGuard`** — Validates `X-Platform-Secret` header. Applied to `/registry/*`.
+- **`ScopedAdminGuard`** — Dual-mode guard: accepts legacy `X-Platform-Secret` header **or** a Bearer JWT containing the `platform:admin` scope. Applied to `/registry/*` and `/admin/*`. This replaces the old `PlatformAdminGuard` and enables gradual migration from shared secrets to scoped JWT tokens.
+- **`PlatformAdminGuard`** *(legacy)* — Validates `X-Platform-Secret` header only. Still available but superseded by `ScopedAdminGuard`.
 
 ---
 
@@ -420,6 +437,7 @@ Services register themselves at startup by sending a **ServiceManifest**:
 ```json
 {
   "serviceId": "user-service",
+  "serviceType": "tribe",
   "name": "User Service",
   "baseUrl": "http://user-service:3001",
   "requiredScopes": ["users:read", "users:write"],
@@ -438,7 +456,7 @@ The registry then:
 - Stores the entry in the **in-memory Map** (zero-latency lookups) and **persists it to Redis** (source of truth)
 - On gateway restart, the in-memory Map is **hydrated from Redis** — services don't need to re-register
 - Publishes a `SERVICE_REGISTERED` Kafka event (Zod-validated)
-- Makes the service available for proxy routing via `/tribes/user-service/*`
+- Makes the service available for proxy routing via `/tribes/user-service/*` (tribe) or `/shared/user-service/*` (shared)
 - Enforces that only services listed in `consumes` can call this service
 - Updates the `registry_services_total` Prometheus gauge
 
@@ -458,6 +476,7 @@ Every `ServiceManifest` supports optional governance metadata:
 | `contact` | `string` | Slack channel or email for incidents |
 | `serviceTier` | `critical \| standard \| experimental` | SLA tier (determines priority) |
 | `costCenter` | `string` | Internal cost centre for showback attribution |
+| `serviceType` | `'shared' \| 'tribe'` | Routing namespace — `tribe` (default) or `shared` (platform service) |
 | `sunsetDate` | `ISO-8601` | Date after which the service is sunset (set on deprecation) |
 | `replacementService` | `serviceId` | The successor service consumers should migrate to |
 
@@ -478,7 +497,7 @@ proposed ──► active ──► deprecated ──► retired
 
 ### Lifecycle Management Endpoints
 
-All endpoints require the `X-Platform-Secret` header (platform admin guard).
+All endpoints require admin authorization via the `ScopedAdminGuard` — either the legacy `X-Platform-Secret` header or a Bearer JWT with the `platform:admin` scope.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -497,7 +516,7 @@ All endpoints require the `X-Platform-Secret` header (platform admin guard).
 3. **Consumers** calling the deprecated service receive RFC 8594 headers:
    - `Deprecation: true`
    - `Sunset: Sun, 01 Jun 2025 00:00:00 GMT`
-   - `Link: </api/v1/tribes/user-service-v2>; rel="successor-version"`
+   - `Link: </api/v1/tribes/user-service-v2>; rel="successor-version"` (or `/shared/...` for shared services)
 4. After the sunset date, the admin calls `POST /registry/user-service/retire`.
 5. All further proxy requests return **410 Gone** with a migration hint.
 
@@ -519,28 +538,27 @@ All service versions must follow **strict semver** (`major.minor.patch`):
 
 ### Showback Metrics
 
-Per-tribe usage is tracked via two Prometheus metrics for cost attribution dashboards:
+Per-namespace usage is tracked via two Prometheus metrics for cost attribution dashboards:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `tribe_requests_total` | Counter | `source_tribe`, `target_service`, `method`, `status_code` | Count of cross-tribe proxy requests |
-| `tribe_request_duration_seconds` | Histogram | `source_tribe`, `target_service` | Proxy latency per tribe pair |
+| `proxy_requests_total` | Counter | `namespace`, `source_tribe`, `target_service`, `method`, `status_code` | Count of proxied requests (both namespaces) |
+| `proxy_request_duration_seconds` | Histogram | `namespace`, `source_tribe`, `target_service` | Proxy latency per caller / target pair |
 
-These metrics are recorded at the proxy boundary in `tribes.controller.ts` and can be queried in Grafana for showback dashboards (e.g., "How many requests did team-X send to service-Y last month?").
+These metrics are recorded at the proxy boundary in `ProxyHandler` (used by both `TribesController` and `SharedServicesController`) and can be queried in Grafana for showback dashboards (e.g., "How many requests did team-X send to service-Y last month?").
+
+> **Backwards compatibility**: The deprecated aliases `tribe_requests_total` and `tribe_request_duration_seconds` still exist and resolve to the same counters (with `namespace='tribe'`).
 
 ---
 
-## External API Proxy
+## External API Proxy (3rd-Party Only)
 
-The gateway provides a unified interface to third-party APIs with built-in resilience:
+The gateway provides a unified interface to **third-party** APIs with built-in resilience. Payment, SMS, and Email are now **registry-managed shared services** (see `examples/` for manifest templates).
 
 | API | Endpoint | Auth Type |
-|-----|----------|-----------|
+|-----|----------|----------|
 | Geolocation | `/external/geolocation/*` | API Key |
 | Geofencing | `/external/geofencing/*` | Bearer |
-| Payment | `/external/payment/*` | Bearer |
-| SMS | `/external/sms/*` | Basic |
-| Email | `/external/email/*` | Bearer |
 
 Each API has:
 - **Circuit Breaker** — Opens after 5 failures, resets after 30s, emits Kafka events on state transitions
@@ -572,16 +590,27 @@ Circuit breakers now emit observability events on every state transition:
 
 ## Kafka Event Bus
 
-19 topics covering the full request lifecycle. **Every event is validated against a Zod schema** before publishing — malformed payloads are rejected and logged, never sent to Kafka.
+**11 active topics** (Zod-validated) plus **5 reserved topics** (defined but not yet in use). Every event is validated against a Zod schema before publishing — malformed payloads are rejected and logged, never sent to Kafka.
+
+### Active Topics
 
 | Category | Topics | Zod Schema |
 |----------|--------|------------|
 | Gateway | `gateway.request`, `gateway.response`, `gateway.error` | `GatewayRequestEventSchema`, `GatewayResponseEventSchema`, `GatewayErrorEventSchema` |
-| Tribes | `tribe.event`, `tribe.request`, `tribe.response` | `TribeRequestEventSchema`, `TribeResponseEventSchema` |
-| External | `external.request`, `external.response`, `external.webhook` | — (unvalidated) |
-| Auth | `auth.token-issued`, `auth.token-revoked` | — (unvalidated) |
+| Tribes | `tribe.request`, `tribe.response` | `TribeRequestEventSchema`, `TribeResponseEventSchema` |
+| External | `external.request` | `ExternalRequestEventSchema` |
 | Audit | `audit.log` | `AuditLogEventSchema` |
 | Registry | `registry.service-registered`, `registry.service-deregistered`, `registry.service-deprecated`, `registry.service-retired`, `registry.service-version-changed` | `RegistryService*EventSchema` |
+
+### Reserved Topics (not yet wired)
+
+| Topic | Intended Use |
+|-------|--------------|
+| `tribe.event` | General tribe lifecycle events |
+| `external.response` | Third-party API response logging |
+| `external.webhook` | Inbound webhook relay |
+| `auth.token-issued` | Token issuance audit |
+| `auth.token-revoked` | Token revocation audit |
 
 All events include `_meta` with `timestamp`, `source`, and `correlationId`.
 
@@ -603,8 +632,8 @@ Metrics are exposed at `GET /metrics` (no `/api/v1` prefix) in Prometheus scrape
 | `http_request_duration_seconds` | Histogram | `method`, `route` | Request latency distribution |
 | `circuit_breaker_state` | Gauge | `api_name` | 0=CLOSED, 1=OPEN, 2=HALF_OPEN |
 | `registry_services_total` | Gauge | — | Number of registered services |
-| `tribe_requests_total` | Counter | `source_tribe`, `target_service`, `method`, `status_code` | Cross-tribe proxy requests (showback) |
-| `tribe_request_duration_seconds` | Histogram | `source_tribe`, `target_service` | Proxy latency per tribe pair (showback) |
+| `proxy_requests_total` | Counter | `namespace`, `source_tribe`, `target_service`, `method`, `status_code` | Proxy requests across both namespaces (showback) |
+| `proxy_request_duration_seconds` | Histogram | `namespace`, `source_tribe`, `target_service` | Proxy latency per namespace / caller / target (showback) |
 
 Default Node.js/process metrics (GC, heap, event loop) are also collected automatically.
 

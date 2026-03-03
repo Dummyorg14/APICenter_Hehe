@@ -9,14 +9,14 @@
 // =============================================================================
 
 import { Controller, Get, Post, Param, UseGuards, Req } from '@nestjs/common';
-import { PlatformAdminGuard } from '../auth/guards/platform-admin.guard';
+import { ScopedAdminGuard } from '../auth/guards/scoped-admin.guard';
 import { ExternalService } from './external.service';
 import { LoggerService } from '../shared/logger.service';
 import { NotFoundError } from '../shared/errors';
 import { AuthenticatedRequest } from '../types';
 
 @Controller('admin/circuit-breakers')
-@UseGuards(PlatformAdminGuard)
+@UseGuards(ScopedAdminGuard)
 export class AdminCircuitBreakerController {
   constructor(
     private readonly externalService: ExternalService,

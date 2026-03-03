@@ -3,15 +3,18 @@
 // =============================================================================
 
 import { ExternalApiConfig } from '../../types';
+import { ConfigService } from '../../config/config.service';
 
-export const geolocationApi: ExternalApiConfig = {
-  name: 'geolocation',
-  displayName: 'Geolocation API',
-  baseUrl: process.env.GEOLOCATION_API_URL || 'https://api.ipgeolocation.io',
-  authType: 'apiKey',
-  authHeader: 'apiKey',
-  authValue: process.env.GEOLOCATION_API_KEY || '',
-  timeout: 10_000,
-  rateLimit: { windowMs: 60_000, max: 100 },
-  healthEndpoint: '/',
-};
+export function createGeolocationApi(config: ConfigService): ExternalApiConfig {
+  return {
+    name: 'geolocation',
+    displayName: 'Geolocation API',
+    baseUrl: config.external.geolocation.url,
+    authType: 'apiKey',
+    authHeader: 'apiKey',
+    authValue: config.external.geolocation.key,
+    timeout: 10_000,
+    rateLimit: { windowMs: 60_000, max: 100 },
+    healthEndpoint: '/',
+  };
+}

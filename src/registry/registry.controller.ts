@@ -17,14 +17,15 @@
 
 import { Controller, Post, Get, Delete, Patch, Body, Param, UseGuards, Req } from '@nestjs/common';
 import { RegistryService } from './registry.service';
-import { PlatformAdminGuard } from '../auth/guards/platform-admin.guard';
+import { ScopedAdminGuard } from '../auth/guards/scoped-admin.guard';
 import { LoggerService } from '../shared/logger.service';
 import { ServiceManifestDto } from '../shared/dto/service-manifest.dto';
+import { DeprecateServiceDto } from '../shared/dto/deprecate-service.dto';
 import { NotFoundError } from '../shared/errors';
-import { AuthenticatedRequest, ServiceTier } from '../types';
+import { AuthenticatedRequest, ServiceTier, ServiceType } from '../types';
 
 @Controller('registry')
-@UseGuards(PlatformAdminGuard)
+@UseGuards(ScopedAdminGuard)
 export class RegistryController {
   constructor(
     private readonly registry: RegistryService,
@@ -40,6 +41,7 @@ export class RegistryController {
       ...dto,
       consumes: dto.consumes ?? [],
       serviceTier: dto.serviceTier as ServiceTier | undefined,
+      serviceType: (dto.serviceType ?? 'tribe') as ServiceType,
     };
     const entry = this.registry.register(manifest);
 
@@ -72,6 +74,7 @@ export class RegistryController {
         name: svc.name,
         baseUrl: svc.baseUrl,
         status: svc.status,
+        serviceType: svc.serviceType ?? 'tribe',
         exposes: svc.exposes,
         requiredScopes: svc.requiredScopes,
         consumes: svc.consumes,
@@ -138,13 +141,13 @@ export class RegistryController {
   @Patch('services/:serviceId/deprecate')
   deprecate(
     @Param('serviceId') serviceId: string,
-    @Body() body: { sunsetDate?: string; replacementService?: string },
+    @Body() dto: DeprecateServiceDto,
     @Req() req: AuthenticatedRequest,
   ) {
     const entry = this.registry.deprecate(
       serviceId,
-      body.sunsetDate,
-      body.replacementService,
+      dto.sunsetDate,
+      dto.replacementService,
     );
 
     const consumers = this.registry.getConsumers(serviceId);

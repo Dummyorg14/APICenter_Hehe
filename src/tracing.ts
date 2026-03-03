@@ -21,25 +21,34 @@ if (process.env.NODE_ENV !== 'production') {
   diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
 }
 
-const jaegerEndpoint =
-  process.env.JAEGER_ENDPOINT || 'http://localhost:14268/api/traces';
+let sdk: NodeSDK | null = null;
 
-const jaegerExporter = new JaegerExporter({
-  endpoint: jaegerEndpoint,
-});
+/**
+ * Initialise OpenTelemetry tracing.
+ * Accepts optional overrides so callers can pass values from ConfigService
+ * without requiring DI (tracing must init before the NestJS container).
+ */
+export function initTracing(opts?: { jaegerEndpoint?: string; serviceName?: string }): void {
+  const jaegerEndpoint =
+    opts?.jaegerEndpoint || process.env.JAEGER_ENDPOINT || 'http://localhost:14268/api/traces';
+  const serviceName =
+    opts?.serviceName || process.env.OTEL_SERVICE_NAME || 'api-center';
 
-const sdk = new NodeSDK({
-  serviceName: process.env.OTEL_SERVICE_NAME || 'api-center',
-  spanProcessors: [new BatchSpanProcessor(jaegerExporter)],
-  instrumentations: [
-    getNodeAutoInstrumentations({
-      // Disable fs instrumentation to reduce noise
-      '@opentelemetry/instrumentation-fs': { enabled: false },
-    }),
-  ],
-});
+  const jaegerExporter = new JaegerExporter({
+    endpoint: jaegerEndpoint,
+  });
 
-export function initTracing(): void {
+  sdk = new NodeSDK({
+    serviceName,
+    spanProcessors: [new BatchSpanProcessor(jaegerExporter)],
+    instrumentations: [
+      getNodeAutoInstrumentations({
+        // Disable fs instrumentation to reduce noise
+        '@opentelemetry/instrumentation-fs': { enabled: false },
+      }),
+    ],
+  });
+
   sdk.start();
   console.log(
     `[Tracing] OpenTelemetry initialized — exporting to Jaeger at ${jaegerEndpoint}`,
@@ -47,6 +56,6 @@ export function initTracing(): void {
 
   // Graceful shutdown
   process.on('SIGTERM', () => {
-    sdk.shutdown().catch(console.error);
+    sdk?.shutdown().catch(console.error);
   });
 }

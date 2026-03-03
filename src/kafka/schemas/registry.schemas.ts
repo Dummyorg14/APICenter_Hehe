@@ -9,6 +9,8 @@ export const RegistryServiceRegisteredEventSchema = z.object({
   name: z.string(),
   baseUrl: z.string(),
   exposes: z.array(z.string()),
+  /** Routing namespace added at registration — 'shared' or 'tribe' */
+  serviceType: z.enum(['shared', 'tribe']).optional(),
   isUpdate: z.boolean().optional(),
   timestamp: z.string().optional(),
 });
