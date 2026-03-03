@@ -23,14 +23,24 @@ import {
   UseGuards,
   OnModuleDestroy,
 } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { createProxyMiddleware, Options } from 'http-proxy-middleware';
 import { RegistryService } from '../registry/registry.service';
 import { DescopeAuthGuard } from '../auth/guards/descope-auth.guard';
 import { DescopeService } from '../auth/descope.service';
 import { LoggerService } from '../shared/logger.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { ForbiddenError, NotFoundError, BadGatewayError } from '../shared/errors';
 import { AuthenticatedRequest } from '../types';
+
+/** HTTP 410 Gone — service has been retired */
+class GoneError extends NotFoundError {
+  constructor(message: string) {
+    super(message);
+    // Override status to 410
+    Object.defineProperty(this, 'status', { value: 410 });
+  }
+}
 
 @Controller('tribes')
 @UseGuards(DescopeAuthGuard)
@@ -42,6 +52,7 @@ export class TribesController implements OnModuleDestroy {
     private readonly registry: RegistryService,
     private readonly descope: DescopeService,
     private readonly logger: LoggerService,
+    private readonly metrics: MetricsService,
   ) {}
 
   onModuleDestroy() {
@@ -54,13 +65,21 @@ export class TribesController implements OnModuleDestroy {
     const tribeId = req.tribeId;
     const all = this.registry.getAll();
 
-    const visible = Object.values(all).map((svc) => ({
-      serviceId: svc.serviceId,
-      name: svc.name,
-      status: svc.status,
-      exposes: svc.exposes,
-      canAccess: tribeId ? this.registry.canConsume(tribeId, svc.serviceId) : false,
-    }));
+    const visible = Object.values(all)
+      .filter((svc) => svc.status !== 'retired')
+      .map((svc) => ({
+        serviceId: svc.serviceId,
+        name: svc.name,
+        status: svc.status,
+        version: svc.version,
+        exposes: svc.exposes,
+        canAccess: tribeId ? this.registry.canConsume(tribeId, svc.serviceId) : false,
+        ...(svc.status === 'deprecated' && {
+          deprecated: true,
+          sunsetDate: svc.sunsetDate,
+          replacementService: svc.replacementService,
+        }),
+      }));
 
     return {
       success: true,
@@ -89,6 +108,10 @@ export class TribesController implements OnModuleDestroy {
     if (!upstream) {
       throw new NotFoundError(`Service '${targetServiceId}' not found or inactive`);
     }
+
+    // ── 1b. Lifecycle gate ────────────────────────────────────────────────────
+    const targetEntry = this.registry.get(targetServiceId);
+    this.enforceLifecycleGate(targetEntry, targetServiceId, res);
 
     // ── 2. Scope check ──────────────────────────────────────────────────────
     if (!this.registry.canConsume(tribeId, targetServiceId)) {
@@ -142,6 +165,7 @@ export class TribesController implements OnModuleDestroy {
     }
 
     // ── 4. Forward the request ───────────────────────────────────────────────
+    const proxyStart = Date.now();
     try {
       (proxy as any)(req, res, (err?: Error) => {
         if (err) {
@@ -149,9 +173,48 @@ export class TribesController implements OnModuleDestroy {
           throw new BadGatewayError(`Upstream '${targetServiceId}' unreachable`);
         }
       });
+      // Record showback metrics (best-effort — res may not be finished yet for streaming)
+      const durationSec = (Date.now() - proxyStart) / 1000;
+      this.metrics.recordTribeRequest(
+        tribeId,
+        targetServiceId,
+        req.method,
+        res.statusCode || 200,
+        durationSec,
+      );
     } catch (error: any) {
+      const durationSec = (Date.now() - proxyStart) / 1000;
+      this.metrics.recordTribeRequest(tribeId, targetServiceId, req.method, 502, durationSec);
       this.logger.error(`Proxy throw error [${targetServiceId}]: ${error.message}`);
       throw new BadGatewayError(`Upstream '${targetServiceId}' unreachable`);
+    }
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────────────────
+
+  /** Reject retired services (410) and set RFC 8594 deprecation headers. */
+  private enforceLifecycleGate(
+    entry: { status?: string; sunsetDate?: string; replacementService?: string } | undefined,
+    serviceId: string,
+    res: Response,
+  ): void {
+    if (entry?.status === 'retired') {
+      throw new GoneError(
+        `Service '${serviceId}' has been retired` +
+          (entry.replacementService ? `. Migrate to '${entry.replacementService}'` : ''),
+      );
+    }
+    if (entry?.status === 'deprecated') {
+      res.setHeader('Deprecation', 'true');
+      if (entry.sunsetDate) {
+        res.setHeader('Sunset', new Date(entry.sunsetDate).toUTCString());
+      }
+      if (entry.replacementService) {
+        res.setHeader(
+          'Link',
+          `</api/v1/tribes/${entry.replacementService}>; rel="successor-version"`,
+        );
+      }
     }
   }
 }

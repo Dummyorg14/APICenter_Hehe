@@ -15,10 +15,17 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import crypto from 'node:crypto';
 import Redis from 'ioredis';
-import { ServiceManifest, ServiceRegistryEntry, ServiceRegistryMap } from '../types';
+import {
+  ServiceManifest,
+  ServiceRegistryEntry,
+  ServiceRegistryMap,
+} from '../types';
 import { LoggerService } from '../shared/logger.service';
 import { ConfigService } from '../config/config.service';
-import { NotFoundError } from '../shared/errors';
+import { KafkaService } from '../kafka/kafka.service';
+import { MetricsService } from '../metrics/metrics.service';
+import { NotFoundError, ConflictError, ValidationError } from '../shared/errors';
+import { TOPICS } from '../kafka/topics';
 
 const REDIS_REGISTRY_KEY = 'api-center:registry:services';
 
@@ -30,6 +37,8 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly logger: LoggerService,
     private readonly config: ConfigService,
+    private readonly kafka: KafkaService,
+    private readonly metrics: MetricsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -72,19 +81,36 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
   /**
    * Register a new service or update an existing one.
    * Writes to both in-memory Map and Redis.
+   * Validates semver on updates and tracks version changes.
    */
   register(manifest: ServiceManifest): ServiceRegistryEntry {
     const now = new Date().toISOString();
     const existing = this.services[manifest.serviceId];
 
+    // ── Version governance ─────────────────────────────────────────────────
+    let previousVersion: string | undefined;
+    if (existing && manifest.version && existing.version) {
+      previousVersion = existing.version;
+      this.validateVersionUpgrade(existing.version, manifest.version);
+    }
+
+    // ── Block registration if service is retired ───────────────────────────
+    if (existing?.status === 'retired') {
+      throw new ConflictError(
+        `Service '${manifest.serviceId}' is retired and cannot be re-registered`,
+      );
+    }
+
     const entry: ServiceRegistryEntry = {
       ...manifest,
       registeredAt: existing?.registeredAt || now,
       updatedAt: now,
-      status: 'active',
+      status: existing?.status === 'deprecated' ? 'deprecated' : 'active',
+      ...(previousVersion && { previousVersion }),
     };
 
     this.services[manifest.serviceId] = entry;
+    this.syncMetricsGauge();
 
     // Persist to Redis (fire-and-forget, non-blocking)
     this.persistToRedis(manifest.serviceId, entry).catch((err) => {
@@ -95,12 +121,36 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
+    // ── Kafka events ──────────────────────────────────────────────────────
+    this.kafka
+      .publish(TOPICS.SERVICE_REGISTERED, {
+        serviceId: manifest.serviceId,
+        name: manifest.name,
+        baseUrl: manifest.baseUrl,
+        exposes: manifest.exposes,
+        isUpdate: !!existing,
+        timestamp: now,
+      })
+      .catch(() => {});
+
+    if (previousVersion && previousVersion !== manifest.version) {
+      this.kafka
+        .publish(TOPICS.SERVICE_VERSION_CHANGED, {
+          serviceId: manifest.serviceId,
+          previousVersion,
+          newVersion: manifest.version,
+          timestamp: now,
+        })
+        .catch(() => {});
+    }
+
     this.logger.info('Service registered', {
       serviceId: manifest.serviceId,
       name: manifest.name,
       baseUrl: manifest.baseUrl,
       exposes: manifest.exposes,
       isUpdate: !!existing,
+      version: manifest.version,
     });
 
     return entry;
@@ -117,6 +167,7 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
     }
 
     delete this.services[serviceId];
+    this.syncMetricsGauge();
 
     // Remove from Redis (fire-and-forget)
     this.removeFromRedis(serviceId).catch((err) => {
@@ -127,7 +178,127 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
+    this.kafka
+      .publish(TOPICS.SERVICE_DEREGISTERED, {
+        serviceId,
+        timestamp: new Date().toISOString(),
+      })
+      .catch(() => {});
+
     this.logger.info('Service deregistered', { serviceId });
+  }
+
+  // -------------------------------------------------------------------------
+  // Lifecycle management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Mark a service as deprecated. It remains routable but consumers receive
+   * sunset warnings in proxy response headers.
+   */
+  deprecate(serviceId: string, sunsetDate?: string, replacementService?: string): ServiceRegistryEntry {
+    const entry = this.services[serviceId];
+    if (!entry) {
+      throw new NotFoundError(`Service '${serviceId}' is not registered`);
+    }
+    if (entry.status === 'retired') {
+      throw new ConflictError(`Service '${serviceId}' is already retired`);
+    }
+
+    entry.status = 'deprecated';
+    entry.updatedAt = new Date().toISOString();
+    if (sunsetDate) entry.sunsetDate = sunsetDate;
+    if (replacementService) entry.replacementService = replacementService;
+
+    this.persistToRedis(serviceId, entry).catch(() => {});
+
+    this.kafka
+      .publish(TOPICS.SERVICE_DEPRECATED, {
+        serviceId,
+        sunsetDate: entry.sunsetDate,
+        replacementService: entry.replacementService,
+        timestamp: entry.updatedAt,
+      })
+      .catch(() => {});
+
+    this.logger.warn(
+      `Service '${serviceId}' deprecated (sunset: ${sunsetDate || 'unset'}, replacement: ${replacementService || 'none'})`,
+      'RegistryService',
+    );
+
+    return entry;
+  }
+
+  /**
+   * Retire a service — it will no longer be routable.
+   * Consumers calling this service will receive 410 Gone.
+   */
+  retire(serviceId: string): ServiceRegistryEntry {
+    const entry = this.services[serviceId];
+    if (!entry) {
+      throw new NotFoundError(`Service '${serviceId}' is not registered`);
+    }
+
+    entry.status = 'retired';
+    entry.updatedAt = new Date().toISOString();
+
+    this.persistToRedis(serviceId, entry).catch(() => {});
+    this.syncMetricsGauge();
+
+    this.kafka
+      .publish(TOPICS.SERVICE_RETIRED, {
+        serviceId,
+        timestamp: entry.updatedAt,
+      })
+      .catch(() => {});
+
+    this.logger.warn(`Service '${serviceId}' retired — no longer routable`, 'RegistryService');
+
+    return entry;
+  }
+
+  /**
+   * Transition a proposed service to active.
+   */
+  activate(serviceId: string): ServiceRegistryEntry {
+    const entry = this.services[serviceId];
+    if (!entry) {
+      throw new NotFoundError(`Service '${serviceId}' is not registered`);
+    }
+    if (entry.status !== 'proposed' && entry.status !== 'deprecated') {
+      throw new ConflictError(
+        `Service '${serviceId}' is '${entry.status}' and cannot be activated`,
+      );
+    }
+
+    entry.status = 'active';
+    entry.updatedAt = new Date().toISOString();
+    entry.sunsetDate = undefined;
+    entry.replacementService = undefined;
+
+    this.persistToRedis(serviceId, entry).catch(() => {});
+    this.syncMetricsGauge();
+
+    this.logger.info(`Service '${serviceId}' activated`, {});
+    return entry;
+  }
+
+  /**
+   * Check whether a service is currently routable.
+   */
+  isRoutable(serviceId: string): boolean {
+    const entry = this.services[serviceId];
+    if (!entry) return false;
+    return entry.status === 'active' || entry.status === 'deprecated';
+  }
+
+  /**
+   * Get consumers — services that list the given serviceId in their consumes array.
+   */
+  getConsumers(serviceId: string): string[] {
+    return Object.values(this.services)
+      .filter((svc) => svc.consumes.includes(serviceId))
+      .map((svc) => svc.serviceId);
   }
 
   // -------------------------------------------------------------------------
@@ -195,6 +366,45 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
       this.register(manifest);
     }
     this.logger.info(`Registry seeded with ${manifests.length} service(s)`, {});
+  }
+
+  // -------------------------------------------------------------------------
+  // Version governance (private)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Validate that a version upgrade follows semver rules.
+   * Prevents major-version downgrades without explicit re-registration.
+   */
+  private validateVersionUpgrade(currentVersion: string, newVersion: string): void {
+    const parseSemver = (v: string) => {
+      const match = /^(\d+)\.(\d+)\.(\d+)/.exec(v);
+      if (!match) return null;
+      return { major: Number.parseInt(match[1]), minor: Number.parseInt(match[2]), patch: Number.parseInt(match[3]) };
+    };
+
+    const current = parseSemver(currentVersion);
+    const next = parseSemver(newVersion);
+
+    if (!current || !next) return; // Skip validation if versions aren't semver
+
+    if (next.major < current.major) {
+      throw new ValidationError(
+        `Version downgrade from ${currentVersion} to ${newVersion} is not allowed. ` +
+        `Deregister the service first if you need to roll back a major version.`,
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Metrics sync (private)
+  // -------------------------------------------------------------------------
+
+  private syncMetricsGauge(): void {
+    const activeCount = Object.values(this.services).filter(
+      (s) => s.status === 'active' || s.status === 'deprecated',
+    ).length;
+    this.metrics.setRegistryServicesCount(activeCount);
   }
 
   // -------------------------------------------------------------------------

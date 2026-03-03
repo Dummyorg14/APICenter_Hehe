@@ -32,6 +32,9 @@ export const TOPICS = {
   // ---- Service Registry events ----
   SERVICE_REGISTERED: 'api-center.registry.service-registered',
   SERVICE_DEREGISTERED: 'api-center.registry.service-deregistered',
+  SERVICE_DEPRECATED: 'api-center.registry.service-deprecated',
+  SERVICE_RETIRED: 'api-center.registry.service-retired',
+  SERVICE_VERSION_CHANGED: 'api-center.registry.service-version-changed',
 } as const;
 
 export type TopicName = (typeof TOPICS)[keyof typeof TOPICS];

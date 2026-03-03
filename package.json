@@ -51,6 +51,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@babel/types": "^7.29.0",
     "@nestjs/cli": "^10.4.0",
     "@nestjs/schematics": "^10.1.0",
     "@nestjs/testing": "^10.4.0",

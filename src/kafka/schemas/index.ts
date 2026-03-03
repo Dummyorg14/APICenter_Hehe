@@ -13,6 +13,9 @@ export { AuditLogEventSchema } from './audit.schemas';
 export {
   RegistryServiceRegisteredEventSchema,
   RegistryServiceDeregisteredEventSchema,
+  RegistryServiceDeprecatedEventSchema,
+  RegistryServiceRetiredEventSchema,
+  RegistryServiceVersionChangedEventSchema,
 } from './registry.schemas';
 export { TribeRequestEventSchema, TribeResponseEventSchema } from './tribe.schemas';
 
@@ -22,5 +25,8 @@ export type { AuditLogEvent as AuditLogKafkaEvent } from './audit.schemas';
 export type {
   RegistryServiceRegisteredEvent,
   RegistryServiceDeregisteredEvent,
+  RegistryServiceDeprecatedEvent,
+  RegistryServiceRetiredEvent,
+  RegistryServiceVersionChangedEvent,
 } from './registry.schemas';
 export type { TribeRequestEvent, TribeResponseEvent } from './tribe.schemas';

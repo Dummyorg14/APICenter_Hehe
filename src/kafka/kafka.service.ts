@@ -22,6 +22,9 @@ import {
   AuditLogEventSchema,
   RegistryServiceRegisteredEventSchema,
   RegistryServiceDeregisteredEventSchema,
+  RegistryServiceDeprecatedEventSchema,
+  RegistryServiceRetiredEventSchema,
+  RegistryServiceVersionChangedEventSchema,
   TribeRequestEventSchema,
   TribeResponseEventSchema,
 } from './schemas';
@@ -37,6 +40,9 @@ const TOPIC_SCHEMAS: Record<string, ZodSchema> = {
   [TOPICS.AUDIT_LOG]: AuditLogEventSchema,
   [TOPICS.SERVICE_REGISTERED]: RegistryServiceRegisteredEventSchema,
   [TOPICS.SERVICE_DEREGISTERED]: RegistryServiceDeregisteredEventSchema,
+  [TOPICS.SERVICE_DEPRECATED]: RegistryServiceDeprecatedEventSchema,
+  [TOPICS.SERVICE_RETIRED]: RegistryServiceRetiredEventSchema,
+  [TOPICS.SERVICE_VERSION_CHANGED]: RegistryServiceVersionChangedEventSchema,
   [TOPICS.TRIBE_REQUEST]: TribeRequestEventSchema,
   [TOPICS.TRIBE_RESPONSE]: TribeResponseEventSchema,
 };

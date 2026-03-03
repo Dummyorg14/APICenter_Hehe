@@ -18,16 +18,17 @@
 8. [NestJS Module System](#nestjs-module-system)
 9. [Authentication & Authorization](#authentication--authorization)
 10. [Dynamic Service Registry](#dynamic-service-registry)
-11. [External API Proxy](#external-api-proxy)
-12. [Circuit Breaker Visibility](#circuit-breaker-visibility)
-13. [Kafka Event Bus](#kafka-event-bus)
-14. [Prometheus Metrics](#prometheus-metrics)
-15. [Distributed Tracing (OpenTelemetry)](#distributed-tracing-opentelemetry)
-16. [Health Checks](#health-checks)
-17. [Secrets Management](#secrets-management)
-18. [SDK — TribeClient](#sdk--tribeclient)
-19. [Docker](#docker)
-20. [Development](#development)
+11. [Service Governance & Lifecycle](#service-governance--lifecycle)
+12. [External API Proxy](#external-api-proxy)
+13. [Circuit Breaker Visibility](#circuit-breaker-visibility)
+14. [Kafka Event Bus](#kafka-event-bus)
+15. [Prometheus Metrics](#prometheus-metrics)
+16. [Distributed Tracing (OpenTelemetry)](#distributed-tracing-opentelemetry)
+17. [Health Checks](#health-checks)
+18. [Secrets Management](#secrets-management)
+19. [SDK — TribeClient](#sdk--tribeclient)
+20. [Docker](#docker)
+21. [Development](#development)
 21. [License](#license)
 
 ---
@@ -425,7 +426,11 @@ Services register themselves at startup by sending a **ServiceManifest**:
   "exposes": ["/users", "/profiles"],
   "consumes": ["notification-service"],
   "healthCheck": "/health",
-  "version": "1.2.0"
+  "version": "1.2.0",
+  "ownerTeam": "identity-squad",
+  "contact": "#identity-oncall",
+  "serviceTier": "critical",
+  "costCenter": "CC-1200"
 }
 ```
 
@@ -436,6 +441,92 @@ The registry then:
 - Makes the service available for proxy routing via `/tribes/user-service/*`
 - Enforces that only services listed in `consumes` can call this service
 - Updates the `registry_services_total` Prometheus gauge
+
+---
+
+## Service Governance & Lifecycle
+
+The platform enforces a governed lifecycle and ownership model so shared services can scale safely across teams.
+
+### Governance Fields
+
+Every `ServiceManifest` supports optional governance metadata:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ownerTeam` | `string` | Team or squad that owns the service |
+| `contact` | `string` | Slack channel or email for incidents |
+| `serviceTier` | `critical \| standard \| experimental` | SLA tier (determines priority) |
+| `costCenter` | `string` | Internal cost centre for showback attribution |
+| `sunsetDate` | `ISO-8601` | Date after which the service is sunset (set on deprecation) |
+| `replacementService` | `serviceId` | The successor service consumers should migrate to |
+
+### Lifecycle States
+
+```
+proposed ──► active ──► deprecated ──► retired
+                 ▲           │
+                 └───────────┘  (re-activate)
+```
+
+| Status | Routable? | Behavior |
+|--------|-----------|----------|
+| `proposed` | No | Registered but not yet approved for traffic |
+| `active` | Yes | Live, serving traffic normally |
+| `deprecated` | Yes | Routable, but proxy adds RFC 8594 `Sunset` + `Deprecation` headers |
+| `retired` | No | Returns **410 Gone**; re-registration blocked |
+
+### Lifecycle Management Endpoints
+
+All endpoints require the `X-Platform-Secret` header (platform admin guard).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `PATCH` | `/api/v1/registry/:serviceId/deprecate` | Deprecate a service (optional: `sunsetDate`, `replacementService`) |
+| `POST` | `/api/v1/registry/:serviceId/retire` | Retire a service — permanently removes from routing |
+| `PATCH` | `/api/v1/registry/:serviceId/activate` | Re-activate a deprecated or proposed service |
+| `GET` | `/api/v1/registry/:serviceId/consumers` | List all services that consume the given service |
+
+### Deprecation Workflow
+
+1. **Platform admin** calls `PATCH /registry/user-service/deprecate` with body:
+   ```json
+   { "sunsetDate": "2025-06-01", "replacementService": "user-service-v2" }
+   ```
+2. A `SERVICE_DEPRECATED` Kafka event is emitted to all listeners.
+3. **Consumers** calling the deprecated service receive RFC 8594 headers:
+   - `Deprecation: true`
+   - `Sunset: Sun, 01 Jun 2025 00:00:00 GMT`
+   - `Link: </api/v1/tribes/user-service-v2>; rel="successor-version"`
+4. After the sunset date, the admin calls `POST /registry/user-service/retire`.
+5. All further proxy requests return **410 Gone** with a migration hint.
+
+### Version Governance
+
+All service versions must follow **strict semver** (`major.minor.patch`):
+- Minor and patch upgrades are always allowed.
+- Major upgrades are allowed.
+- **Major downgrades are rejected** — deregister first, then re-register if rollback is needed.
+- Every version change emits a `SERVICE_VERSION_CHANGED` Kafka event with `previousVersion` and `newVersion`.
+
+### Kafka Events (Lifecycle)
+
+| Topic | Trigger |
+|-------|---------|
+| `registry.service-deprecated` | Service marked as deprecated |
+| `registry.service-retired` | Service permanently retired |
+| `registry.service-version-changed` | Version updated on re-registration |
+
+### Showback Metrics
+
+Per-tribe usage is tracked via two Prometheus metrics for cost attribution dashboards:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `tribe_requests_total` | Counter | `source_tribe`, `target_service`, `method`, `status_code` | Count of cross-tribe proxy requests |
+| `tribe_request_duration_seconds` | Histogram | `source_tribe`, `target_service` | Proxy latency per tribe pair |
+
+These metrics are recorded at the proxy boundary in `tribes.controller.ts` and can be queried in Grafana for showback dashboards (e.g., "How many requests did team-X send to service-Y last month?").
 
 ---
 
@@ -490,7 +581,7 @@ Circuit breakers now emit observability events on every state transition:
 | External | `external.request`, `external.response`, `external.webhook` | — (unvalidated) |
 | Auth | `auth.token-issued`, `auth.token-revoked` | — (unvalidated) |
 | Audit | `audit.log` | `AuditLogEventSchema` |
-| Registry | `registry.service-registered`, `registry.service-deregistered` | `RegistryServiceRegisteredEventSchema`, `RegistryServiceDeregisteredEventSchema` |
+| Registry | `registry.service-registered`, `registry.service-deregistered`, `registry.service-deprecated`, `registry.service-retired`, `registry.service-version-changed` | `RegistryService*EventSchema` |
 
 All events include `_meta` with `timestamp`, `source`, and `correlationId`.
 
@@ -512,6 +603,8 @@ Metrics are exposed at `GET /metrics` (no `/api/v1` prefix) in Prometheus scrape
 | `http_request_duration_seconds` | Histogram | `method`, `route` | Request latency distribution |
 | `circuit_breaker_state` | Gauge | `api_name` | 0=CLOSED, 1=OPEN, 2=HALF_OPEN |
 | `registry_services_total` | Gauge | — | Number of registered services |
+| `tribe_requests_total` | Counter | `source_tribe`, `target_service`, `method`, `status_code` | Cross-tribe proxy requests (showback) |
+| `tribe_request_duration_seconds` | Histogram | `source_tribe`, `target_service` | Proxy latency per tribe pair (showback) |
 
 Default Node.js/process metrics (GC, heap, event loop) are also collected automatically.
 

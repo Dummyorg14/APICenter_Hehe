@@ -19,3 +19,25 @@ export const RegistryServiceDeregisteredEventSchema = z.object({
   timestamp: z.string().optional(),
 });
 export type RegistryServiceDeregisteredEvent = z.infer<typeof RegistryServiceDeregisteredEventSchema>;
+
+export const RegistryServiceDeprecatedEventSchema = z.object({
+  serviceId: z.string(),
+  sunsetDate: z.string().optional(),
+  replacementService: z.string().optional(),
+  timestamp: z.string().optional(),
+});
+export type RegistryServiceDeprecatedEvent = z.infer<typeof RegistryServiceDeprecatedEventSchema>;
+
+export const RegistryServiceRetiredEventSchema = z.object({
+  serviceId: z.string(),
+  timestamp: z.string().optional(),
+});
+export type RegistryServiceRetiredEvent = z.infer<typeof RegistryServiceRetiredEventSchema>;
+
+export const RegistryServiceVersionChangedEventSchema = z.object({
+  serviceId: z.string(),
+  previousVersion: z.string(),
+  newVersion: z.string(),
+  timestamp: z.string().optional(),
+});
+export type RegistryServiceVersionChangedEvent = z.infer<typeof RegistryServiceVersionChangedEventSchema>;

@@ -12,5 +12,6 @@ export const AuditLogEventSchema = z.object({
   durationMs: z.number(),
   ip: z.string(),
   correlationId: z.string().optional(),
+  targetServiceId: z.string().optional(),
 });
 export type AuditLogEvent = z.infer<typeof AuditLogEventSchema>;

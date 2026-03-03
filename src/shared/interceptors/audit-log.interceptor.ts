@@ -44,6 +44,12 @@ export class AuditLogInterceptor implements NestInterceptor {
 
   private publishAudit(request: Request, response: Response, start: number) {
     const authReq = request as AuthenticatedRequest;
+
+    // Extract the target service from tribe proxy URLs  /api/v1/tribes/:targetServiceId/*
+    const pathParts = request.originalUrl.split('/');
+    const tribesIdx = pathParts.indexOf('tribes');
+    const targetServiceId = tribesIdx >= 0 ? pathParts[tribesIdx + 1] : undefined;
+
     this.kafka
       .publish(TOPICS.AUDIT_LOG, {
         tribeId: authReq.tribeId || 'anonymous',
@@ -53,6 +59,7 @@ export class AuditLogInterceptor implements NestInterceptor {
         durationMs: Date.now() - start,
         ip: request.ip || 'unknown',
         correlationId: authReq.correlationId,
+        ...(targetServiceId && { targetServiceId }),
       }, authReq.tribeId)
       .catch((err) => {
         this.logger.debug(

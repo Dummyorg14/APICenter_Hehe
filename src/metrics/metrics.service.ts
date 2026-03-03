@@ -25,6 +25,10 @@ export class MetricsService implements OnModuleInit {
   // ---- Registry Metrics ----
   readonly registryServicesTotal: Gauge;
 
+  // ---- Showback / Usage Metrics ----
+  readonly tribeRequestsTotal: Counter;
+  readonly tribeRequestDuration: Histogram;
+
   constructor() {
     this.httpRequestsTotal = new Counter({
       name: 'http_requests_total',
@@ -48,6 +52,19 @@ export class MetricsService implements OnModuleInit {
     this.registryServicesTotal = new Gauge({
       name: 'registry_services_total',
       help: 'Total number of registered services in the registry',
+    });
+
+    this.tribeRequestsTotal = new Counter({
+      name: 'tribe_requests_total',
+      help: 'Total cross-tribe proxy requests (for showback attribution)',
+      labelNames: ['source_tribe', 'target_service', 'method', 'status_code'] as const,
+    });
+
+    this.tribeRequestDuration = new Histogram({
+      name: 'tribe_request_duration_seconds',
+      help: 'Cross-tribe proxy request duration in seconds (for showback)',
+      labelNames: ['source_tribe', 'target_service'] as const,
+      buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
     });
   }
 
@@ -81,5 +98,27 @@ export class MetricsService implements OnModuleInit {
    */
   setRegistryServicesCount(count: number) {
     this.registryServicesTotal.set(count);
+  }
+
+  /**
+   * Record a cross-tribe proxy request for showback attribution.
+   */
+  recordTribeRequest(
+    sourceTribe: string,
+    targetService: string,
+    method: string,
+    statusCode: number,
+    durationSec: number,
+  ) {
+    this.tribeRequestsTotal.inc({
+      source_tribe: sourceTribe,
+      target_service: targetService,
+      method,
+      status_code: String(statusCode),
+    });
+    this.tribeRequestDuration.observe(
+      { source_tribe: sourceTribe, target_service: targetService },
+      durationSec,
+    );
   }
 }

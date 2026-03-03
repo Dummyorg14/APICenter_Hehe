@@ -57,6 +57,16 @@ export interface TokenResponse {
 // Service Registry types (Dynamic Service Registry)
 // ---------------------------------------------------------------------------
 
+/** Service tier determines SLA expectations and priority in the platform */
+export type ServiceTier = 'critical' | 'standard' | 'experimental';
+
+/** Lifecycle status for governed service management */
+export type ServiceLifecycleStatus =
+  | 'proposed'      // Submitted but not yet approved for traffic
+  | 'active'        // Live and serving traffic
+  | 'deprecated'    // Still live but consumers should migrate
+  | 'retired';      // No longer routable — kept for audit history
+
 /**
  * A service manifest is what a tribe/service sends when registering
  * with the API Center via POST /api/v1/registry/register.
@@ -72,6 +82,20 @@ export interface ServiceManifest {
   version?: string;
   description?: string;
   tags?: string[];
+
+  // ── Governance fields ────────────────────────────────────────────────────
+  /** Team or squad that owns and operates this service */
+  ownerTeam?: string;
+  /** Primary contact email / Slack channel for incidents */
+  contact?: string;
+  /** SLA tier: critical (99.9 %), standard (99.5 %), experimental (best-effort) */
+  serviceTier?: ServiceTier;
+  /** Internal cost centre for showback / chargeback attribution */
+  costCenter?: string;
+  /** ISO-8601 date after which the service is considered deprecated */
+  sunsetDate?: string;
+  /** serviceId of the replacement service consumers should migrate to */
+  replacementService?: string;
 }
 
 /**
@@ -80,7 +104,9 @@ export interface ServiceManifest {
 export interface ServiceRegistryEntry extends ServiceManifest {
   registeredAt: string;
   updatedAt: string;
-  status: 'active' | 'inactive' | 'degraded';
+  status: ServiceLifecycleStatus;
+  /** Previous version string — set on update when version changes */
+  previousVersion?: string;
 }
 
 /** Map of service ID → ServiceRegistryEntry */

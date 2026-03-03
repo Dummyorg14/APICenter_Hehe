@@ -13,6 +13,8 @@ import {
   IsArray,
   ArrayMinSize,
   IsOptional,
+  IsIn,
+  IsDateString,
   Matches,
 } from 'class-validator';
 
@@ -55,6 +57,7 @@ export class ServiceManifestDto {
 
   @IsString()
   @IsOptional()
+  @Matches(/^\d+\.\d+\.\d+/, { message: 'version must follow semver (e.g. 1.0.0)' })
   version?: string;
 
   @IsString()
@@ -66,4 +69,39 @@ export class ServiceManifestDto {
   @IsString({ each: true })
   @IsOptional()
   tags?: string[];
+
+  // ── Governance fields ──────────────────────────────────────────────────────
+
+  @IsString()
+  @MaxLength(128)
+  @IsOptional()
+  ownerTeam?: string;
+
+  @IsString()
+  @MaxLength(256, { message: 'contact is too long' })
+  @IsOptional()
+  contact?: string;
+
+  @IsString()
+  @IsIn(['critical', 'standard', 'experimental'], {
+    message: 'serviceTier must be critical, standard, or experimental',
+  })
+  @IsOptional()
+  serviceTier?: string;
+
+  @IsString()
+  @MaxLength(64)
+  @IsOptional()
+  costCenter?: string;
+
+  @IsDateString({}, { message: 'sunsetDate must be a valid ISO-8601 date' })
+  @IsOptional()
+  sunsetDate?: string;
+
+  @IsString()
+  @Matches(/^[a-z0-9-]+$/, {
+    message: 'replacementService must be a valid serviceId',
+  })
+  @IsOptional()
+  replacementService?: string;
 }

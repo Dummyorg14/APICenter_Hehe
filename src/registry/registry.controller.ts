@@ -15,13 +15,13 @@
 //  DELETE /api/v1/registry/services/:serviceId — Deregister a service
 // =============================================================================
 
-import { Controller, Post, Get, Delete, Body, Param, UseGuards, Req } from '@nestjs/common';
+import { Controller, Post, Get, Delete, Patch, Body, Param, UseGuards, Req } from '@nestjs/common';
 import { RegistryService } from './registry.service';
 import { PlatformAdminGuard } from '../auth/guards/platform-admin.guard';
 import { LoggerService } from '../shared/logger.service';
 import { ServiceManifestDto } from '../shared/dto/service-manifest.dto';
 import { NotFoundError } from '../shared/errors';
-import { AuthenticatedRequest } from '../types';
+import { AuthenticatedRequest, ServiceTier } from '../types';
 
 @Controller('registry')
 @UseGuards(PlatformAdminGuard)
@@ -39,6 +39,7 @@ export class RegistryController {
     const manifest = {
       ...dto,
       consumes: dto.consumes ?? [],
+      serviceTier: dto.serviceTier as ServiceTier | undefined,
     };
     const entry = this.registry.register(manifest);
 
@@ -75,6 +76,13 @@ export class RegistryController {
         requiredScopes: svc.requiredScopes,
         consumes: svc.consumes,
         version: svc.version,
+        previousVersion: svc.previousVersion,
+        ownerTeam: svc.ownerTeam,
+        contact: svc.contact,
+        serviceTier: svc.serviceTier,
+        costCenter: svc.costCenter,
+        sunsetDate: svc.sunsetDate,
+        replacementService: svc.replacementService,
         registeredAt: svc.registeredAt,
         updatedAt: svc.updatedAt,
       })),
@@ -118,6 +126,104 @@ export class RegistryController {
       success: true,
       data: { serviceId, message: `Service '${serviceId}' has been deregistered` },
       meta: { timestamp: new Date().toISOString(), correlationId: req.correlationId },
+    };
+  }
+
+  // ─── Lifecycle management ────────────────────────────────────────────────────
+
+  /**
+   * PATCH /api/v1/registry/services/:serviceId/deprecate
+   * Mark a service as deprecated. Consumers will receive Sunset headers.
+   */
+  @Patch('services/:serviceId/deprecate')
+  deprecate(
+    @Param('serviceId') serviceId: string,
+    @Body() body: { sunsetDate?: string; replacementService?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const entry = this.registry.deprecate(
+      serviceId,
+      body.sunsetDate,
+      body.replacementService,
+    );
+
+    const consumers = this.registry.getConsumers(serviceId);
+
+    this.logger.warn(
+      `Service '${serviceId}' deprecated via API — ${consumers.length} consumer(s) affected`,
+      'RegistryController',
+    );
+
+    return {
+      success: true,
+      data: {
+        ...entry,
+        affectedConsumers: consumers,
+      },
+      meta: { timestamp: new Date().toISOString(), correlationId: req.correlationId },
+    };
+  }
+
+  /**
+   * POST /api/v1/registry/services/:serviceId/retire
+   * Permanently retire a service — it will return 410 Gone to callers.
+   */
+  @Post('services/:serviceId/retire')
+  retire(@Param('serviceId') serviceId: string, @Req() req: AuthenticatedRequest) {
+    const consumers = this.registry.getConsumers(serviceId);
+    const entry = this.registry.retire(serviceId);
+
+    this.logger.warn(
+      `Service '${serviceId}' retired via API — ${consumers.length} consumer(s) affected`,
+      'RegistryController',
+    );
+
+    return {
+      success: true,
+      data: {
+        ...entry,
+        affectedConsumers: consumers,
+      },
+      meta: { timestamp: new Date().toISOString(), correlationId: req.correlationId },
+    };
+  }
+
+  /**
+   * PATCH /api/v1/registry/services/:serviceId/activate
+   * Re-activate a proposed or deprecated service.
+   */
+  @Patch('services/:serviceId/activate')
+  activate(@Param('serviceId') serviceId: string, @Req() req: AuthenticatedRequest) {
+    const entry = this.registry.activate(serviceId);
+
+    this.logger.info(`Service '${serviceId}' activated via API`, {
+      correlationId: req.correlationId,
+    });
+
+    return {
+      success: true,
+      data: entry,
+      meta: { timestamp: new Date().toISOString(), correlationId: req.correlationId },
+    };
+  }
+
+  /**
+   * GET /api/v1/registry/services/:serviceId/consumers
+   * List services that consume the given service.
+   */
+  @Get('services/:serviceId/consumers')
+  getConsumers(@Param('serviceId') serviceId: string) {
+    const entry = this.registry.get(serviceId);
+    if (!entry) {
+      throw new NotFoundError(`Service '${serviceId}' is not registered`);
+    }
+
+    const consumers = this.registry.getConsumers(serviceId);
+
+    return {
+      success: true,
+      data: { serviceId, consumers },
+      meta: { total: consumers.length, timestamp: new Date().toISOString() },
     };
   }
 }

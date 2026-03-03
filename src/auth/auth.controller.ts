@@ -76,6 +76,7 @@ export class AuthController {
       success: true,
       data: {
         accessToken: token.sessionJwt,
+        refreshToken: token.refreshJwt ?? null,
         expiresIn: token.expiresIn,
         tribeId,
         permissions,
@@ -99,6 +100,7 @@ export class AuthController {
       success: true,
       data: {
         accessToken: resp.data.sessionJwt,
+        refreshToken: resp.data.refreshJwt ?? null,
         expiresIn: resp.data.expiresIn,
       },
       meta: { timestamp: new Date().toISOString(), correlationId: req.correlationId },
