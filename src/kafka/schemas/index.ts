@@ -17,8 +17,10 @@ export {
   RegistryServiceDeprecatedEventSchema,
   RegistryServiceRetiredEventSchema,
   RegistryServiceVersionChangedEventSchema,
+  RegistryServiceHealthChangedEventSchema,
 } from './registry.schemas';
 export { TribeRequestEventSchema, TribeResponseEventSchema } from './tribe.schemas';
+export { TokenIssuedEventSchema } from './auth.schemas';
 
 // Re-export inferred types
 export type { GatewayRequestEvent, GatewayResponseEvent, GatewayErrorEvent } from './gateway.schemas';
@@ -30,5 +32,7 @@ export type {
   RegistryServiceDeprecatedEvent,
   RegistryServiceRetiredEvent,
   RegistryServiceVersionChangedEvent,
+  RegistryServiceHealthChangedEvent,
 } from './registry.schemas';
 export type { TribeRequestEvent, TribeResponseEvent } from './tribe.schemas';
+export type { TokenIssuedEvent } from './auth.schemas';

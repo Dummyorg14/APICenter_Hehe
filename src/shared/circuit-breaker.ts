@@ -104,6 +104,45 @@ export class CircuitBreaker {
     }
   }
 
+  /**
+   * Check whether a request can proceed through the circuit breaker.
+   * Returns `false` when the circuit is OPEN and the cooldown has not elapsed
+   * (fail-fast). Transitions OPEN → HALF_OPEN when the cooldown period passes.
+   *
+   * Use this instead of `execute()` for event-based / streaming flows
+   * (e.g. http-proxy-middleware) where the operation cannot be wrapped in a
+   * single Promise.
+   */
+  tryAcquire(): boolean {
+    if (this.state === CircuitState.OPEN) {
+      if (Date.now() - this.lastFailureTime >= this.resetTimeoutMs) {
+        const previous = this.state;
+        this.state = CircuitState.HALF_OPEN;
+        this.successCount = 0;
+        this.logger.log(
+          `Circuit breaker [${this.name}] transitioning to HALF_OPEN`,
+          'CircuitBreaker',
+        );
+        if (this.onStateChange) {
+          this.onStateChange(this.name, previous, CircuitState.HALF_OPEN);
+        }
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  /** Record a successful upstream response (use with `tryAcquire`). */
+  recordSuccess(): void {
+    this.onSuccess();
+  }
+
+  /** Record a failed upstream response — timeout, 502/503/504, connection error (use with `tryAcquire`). */
+  recordFailure(): void {
+    this.onFailure();
+  }
+
   private onSuccess(): void {
     if (this.state === CircuitState.HALF_OPEN) {
       this.successCount++;

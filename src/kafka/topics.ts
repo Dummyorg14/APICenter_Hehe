@@ -28,6 +28,7 @@ export const TOPICS = {
   SERVICE_DEPRECATED: 'api-center.registry.service-deprecated',
   SERVICE_RETIRED: 'api-center.registry.service-retired',
   SERVICE_VERSION_CHANGED: 'api-center.registry.service-version-changed',
+  SERVICE_HEALTH_CHANGED: 'api-center.registry.service-health-changed',
 
   // ---- Reserved (not yet implemented — kept for future use) ----
   /** @reserved Cross-tribe pub/sub events (planned) */
@@ -36,7 +37,7 @@ export const TOPICS = {
   EXTERNAL_RESPONSE: 'api-center.external.response',
   /** @reserved Inbound webhook forwarding (planned) */
   EXTERNAL_WEBHOOK: 'api-center.external.webhook',
-  /** @reserved Auth lifecycle events (planned) */
+  /** Auth lifecycle event — emitted on successful M2M token issuance */
   TOKEN_ISSUED: 'api-center.auth.token-issued',
   /** @reserved Auth lifecycle events (planned) */
   TOKEN_REVOKED: 'api-center.auth.token-revoked',

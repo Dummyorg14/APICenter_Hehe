@@ -16,6 +16,8 @@ import { Controller, Post, Body, Req } from '@nestjs/common';
 import { DescopeService } from './descope.service';
 import { RegistryService } from '../registry/registry.service';
 import { LoggerService } from '../shared/logger.service';
+import { KafkaService } from '../kafka/kafka.service';
+import { TOPICS } from '../kafka/topics';
 import { NotFoundError, UnauthorizedError } from '../shared/errors';
 import { TokenRequestDto } from '../shared/dto/token-request.dto';
 import { RefreshTokenDto } from '../shared/dto/refresh-token.dto';
@@ -27,6 +29,7 @@ export class AuthController {
     private readonly descope: DescopeService,
     private readonly registry: RegistryService,
     private readonly logger: LoggerService,
+    private readonly kafka: KafkaService,
   ) {}
 
   /**
@@ -71,6 +74,28 @@ export class AuthController {
       scopes,
       correlationId: req.correlationId,
     });
+
+    // Emit auth lifecycle event (never includes raw JWT)
+    this.kafka
+      .publish(
+        TOPICS.TOKEN_ISSUED,
+        {
+          tribeId,
+          scopes,
+          permissions,
+          expiresIn: token.expiresIn,
+          correlationId: req.correlationId,
+          timestamp: new Date().toISOString(),
+        },
+        tribeId,
+      )
+      .catch((err) =>
+        this.logger.error(
+          `Failed to publish TOKEN_ISSUED event: ${(err as Error).message}`,
+          (err as Error).stack,
+          'AuthController',
+        ),
+      );
 
     return {
       success: true,

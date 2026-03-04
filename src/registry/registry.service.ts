@@ -30,10 +30,14 @@ import { TOPICS } from '../kafka/topics';
 
 const REDIS_REGISTRY_KEY = 'api-center:registry:services';
 
+/** Default timeout for critical Redis writes (ms). */
+const REDIS_WRITE_TIMEOUT_MS = 2_000;
+
 @Injectable()
 export class RegistryService implements OnModuleInit, OnModuleDestroy {
   private readonly services: ServiceRegistryMap = {};
   private redis: Redis | null = null;
+  private readonly cacheInvalidationListeners = new Set<(serviceId: string) => void>();
 
   constructor(
     private readonly logger: LoggerService,
@@ -76,6 +80,35 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
   }
 
   // -------------------------------------------------------------------------
+  // Cache invalidation listeners
+  // -------------------------------------------------------------------------
+
+  /**
+   * Register a listener that is notified whenever a service is re-registered
+   * (e.g. its baseUrl may have changed). Returns an unsubscribe function.
+   * Used by ProxyHandler to drop stale cached middleware instances.
+   */
+  onCacheInvalidation(listener: (serviceId: string) => void): () => void {
+    this.cacheInvalidationListeners.add(listener);
+    return () => {
+      this.cacheInvalidationListeners.delete(listener);
+    };
+  }
+
+  private notifyCacheInvalidation(serviceId: string): void {
+    for (const listener of this.cacheInvalidationListeners) {
+      try {
+        listener(serviceId);
+      } catch (err) {
+        this.logger.warn(
+          `Cache invalidation listener error for '${serviceId}': ${(err as Error).message}`,
+          'RegistryService',
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Registration
   // -------------------------------------------------------------------------
 
@@ -83,8 +116,11 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
    * Register a new service or update an existing one.
    * Writes to both in-memory Map and Redis.
    * Validates semver on updates and tracks version changes.
+   *
+   * Redis persistence is **awaited** with a strict timeout — if Redis is
+   * unavailable the registration fails so in-memory and Redis never drift.
    */
-  register(manifest: ServiceManifest): ServiceRegistryEntry {
+  async register(manifest: ServiceManifest): Promise<ServiceRegistryEntry> {
     const now = new Date().toISOString();
     const existing = this.services[manifest.serviceId];
 
@@ -114,14 +150,9 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
     this.services[manifest.serviceId] = entry;
     this.syncMetricsGauge();
 
-    // Persist to Redis (fire-and-forget, non-blocking)
-    this.persistToRedis(manifest.serviceId, entry).catch((err) => {
-      this.logger.error(
-        `Failed to persist service to Redis: ${(err as Error).message}`,
-        (err as Error).stack,
-        'RegistryService',
-      );
-    });
+    // Persist to Redis with a strict timeout — fail the registration if Redis
+    // is unavailable so the gateway never silently drifts from its source of truth.
+    await this.persistToRedisStrict(manifest.serviceId, entry);
 
     // ── Kafka events ──────────────────────────────────────────────────────
     this.kafka
@@ -166,6 +197,11 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
       version: manifest.version,
     });
 
+    // ── Invalidate proxy caches on re-registration (baseUrl may have changed)
+    if (existing) {
+      this.notifyCacheInvalidation(manifest.serviceId);
+    }
+
     return entry;
   }
 
@@ -173,7 +209,7 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
    * Remove a service from the registry.
    * Removes from both in-memory Map and Redis.
    */
-  deregister(serviceId: string): void {
+  async deregister(serviceId: string): Promise<void> {
     const existing = this.services[serviceId];
     if (!existing) {
       throw new NotFoundError(`Service '${serviceId}' is not registered`);
@@ -182,14 +218,8 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
     delete this.services[serviceId];
     this.syncMetricsGauge();
 
-    // Remove from Redis (fire-and-forget)
-    this.removeFromRedis(serviceId).catch((err) => {
-      this.logger.error(
-        `Failed to remove service from Redis: ${(err as Error).message}`,
-        (err as Error).stack,
-        'RegistryService',
-      );
-    });
+    // Remove from Redis with strict timeout
+    await this.removeFromRedisStrict(serviceId);
 
     this.kafka
       .publish(TOPICS.SERVICE_DEREGISTERED, {
@@ -328,10 +358,12 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Check whether a service is currently routable.
+   * A service is routable if it is active or deprecated AND healthy.
    */
   isRoutable(serviceId: string): boolean {
     const entry = this.services[serviceId];
     if (!entry) return false;
+    if (entry.healthy === false) return false;
     return entry.status === 'active' || entry.status === 'deprecated';
   }
 
@@ -411,12 +443,58 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
   }
 
   // -------------------------------------------------------------------------
+  // Health status (called by HealthMonitorService)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Update the runtime health flag on a service entry.
+   * Returns `true` if the health status actually **changed** (for event emission).
+   */
+  setHealthStatus(serviceId: string, healthy: boolean): boolean {
+    const entry = this.services[serviceId];
+    if (!entry) return false;
+
+    const previous = entry.healthy ?? true; // default is healthy
+    if (previous === healthy) return false; // no change
+
+    entry.healthy = healthy;
+    entry.lastHealthCheckAt = new Date().toISOString();
+    entry.updatedAt = entry.lastHealthCheckAt;
+
+    // Best-effort persist to Redis (health flap should not block callers)
+    this.persistToRedis(serviceId, entry).catch((err) => {
+      this.logger.warn(
+        `Redis persist failed for health update '${serviceId}': ${(err as Error).message}`,
+        'RegistryService',
+      );
+    });
+
+    return true;
+  }
+
+  /**
+   * Mark the `lastHealthCheckAt` timestamp without changing the healthy flag.
+   */
+  touchHealthCheck(serviceId: string): void {
+    const entry = this.services[serviceId];
+    if (entry) {
+      entry.lastHealthCheckAt = new Date().toISOString();
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Bulk seeding
   // -------------------------------------------------------------------------
 
   seed(manifests: ServiceManifest[]): void {
     for (const manifest of manifests) {
-      this.register(manifest);
+      // Seed uses fire-and-forget style — Redis catch handled inside register
+      this.register(manifest).catch((err) => {
+        this.logger.warn(
+          `Seed failed for '${manifest.serviceId}': ${(err as Error).message}`,
+          'RegistryService',
+        );
+      });
     }
     this.logger.info(`Registry seeded with ${manifests.length} service(s)`, {});
   }
@@ -461,14 +539,14 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
   }
 
   // -------------------------------------------------------------------------
-  // Redis persistence (private)
+  // Redis persistence (private & public helpers)
   // -------------------------------------------------------------------------
 
   /**
    * Load all service entries from Redis into the in-memory Map.
-   * Called once during onModuleInit to survive gateway restarts.
+   * Called during onModuleInit and by the reconciliation cron job.
    */
-  private async loadFromRedis(): Promise<void> {
+  async loadFromRedis(): Promise<void> {
     if (!this.redis) return;
 
     const entries = await this.redis.hgetall(REDIS_REGISTRY_KEY);
@@ -493,6 +571,29 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Return the raw Redis hash entries for drift comparison.
+   * Returns `null` when Redis is unavailable.
+   */
+  async getRedisEntries(): Promise<Record<string, ServiceRegistryEntry> | null> {
+    if (!this.redis) return null;
+
+    const raw = await this.redis.hgetall(REDIS_REGISTRY_KEY);
+    const entries: Record<string, ServiceRegistryEntry> = {};
+
+    for (const [serviceId, json] of Object.entries(raw)) {
+      try {
+        entries[serviceId] = JSON.parse(json);
+      } catch {
+        this.logger.warn(
+          `Failed to parse Redis entry for '${serviceId}' during drift check`,
+          'RegistryService',
+        );
+      }
+    }
+    return entries;
+  }
+
+  /**
    * Persist a single service entry to Redis.
    */
   private async persistToRedis(serviceId: string, entry: ServiceRegistryEntry): Promise<void> {
@@ -506,5 +607,76 @@ export class RegistryService implements OnModuleInit, OnModuleDestroy {
   private async removeFromRedis(serviceId: string): Promise<void> {
     if (!this.redis) return;
     await this.redis.hdel(REDIS_REGISTRY_KEY, serviceId);
+  }
+
+  /**
+   * Persist to Redis with a hard timeout. Throws if the write takes longer
+   * than `REDIS_WRITE_TIMEOUT_MS` or if Redis is unavailable.
+   */
+  private async persistToRedisStrict(
+    serviceId: string,
+    entry: ServiceRegistryEntry,
+  ): Promise<void> {
+    if (!this.redis) {
+      this.logger.warn(
+        `Redis unavailable — registration for '${serviceId}' persisted in-memory only`,
+        'RegistryService',
+      );
+      return;
+    }
+
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Redis write timed out after ${REDIS_WRITE_TIMEOUT_MS}ms`)),
+        REDIS_WRITE_TIMEOUT_MS,
+      ),
+    );
+
+    try {
+      await Promise.race([
+        this.redis.hset(REDIS_REGISTRY_KEY, serviceId, JSON.stringify(entry)),
+        timeout,
+      ]);
+    } catch (err) {
+      // Roll back the in-memory write so we stay consistent
+      delete this.services[serviceId];
+      this.syncMetricsGauge();
+      throw new Error(
+        `Registration for '${serviceId}' failed — Redis write error: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Remove from Redis with a hard timeout. Throws on failure.
+   */
+  private async removeFromRedisStrict(serviceId: string): Promise<void> {
+    if (!this.redis) {
+      this.logger.warn(
+        `Redis unavailable — deregistration for '${serviceId}' applied in-memory only`,
+        'RegistryService',
+      );
+      return;
+    }
+
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Redis delete timed out after ${REDIS_WRITE_TIMEOUT_MS}ms`)),
+        REDIS_WRITE_TIMEOUT_MS,
+      ),
+    );
+
+    try {
+      await Promise.race([
+        this.redis.hdel(REDIS_REGISTRY_KEY, serviceId),
+        timeout,
+      ]);
+    } catch (err) {
+      this.logger.error(
+        `Redis delete failed for '${serviceId}': ${(err as Error).message}`,
+        (err as Error).stack,
+        'RegistryService',
+      );
+    }
   }
 }

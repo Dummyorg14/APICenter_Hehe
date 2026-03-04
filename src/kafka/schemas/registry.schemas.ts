@@ -43,3 +43,12 @@ export const RegistryServiceVersionChangedEventSchema = z.object({
   timestamp: z.string().optional(),
 });
 export type RegistryServiceVersionChangedEvent = z.infer<typeof RegistryServiceVersionChangedEventSchema>;
+
+export const RegistryServiceHealthChangedEventSchema = z.object({
+  serviceId: z.string(),
+  healthy: z.boolean(),
+  previousHealthy: z.boolean(),
+  reason: z.string().optional(),
+  timestamp: z.string().optional(),
+});
+export type RegistryServiceHealthChangedEvent = z.infer<typeof RegistryServiceHealthChangedEventSchema>;

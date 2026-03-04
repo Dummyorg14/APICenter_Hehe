@@ -20,16 +20,18 @@
 10. [Dynamic Service Registry](#dynamic-service-registry)
 11. [Service Governance & Lifecycle](#service-governance--lifecycle)
 12. [External API Proxy](#external-api-proxy)
-13. [Circuit Breaker Visibility](#circuit-breaker-visibility)
-14. [Kafka Event Bus](#kafka-event-bus)
-15. [Prometheus Metrics](#prometheus-metrics)
-16. [Distributed Tracing (OpenTelemetry)](#distributed-tracing-opentelemetry)
-17. [Health Checks](#health-checks)
-18. [Secrets Management](#secrets-management)
-19. [SDK — TribeClient](#sdk--tribeclient)
-20. [Docker](#docker)
-21. [Development](#development)
-21. [License](#license)
+13. [Proxy Resilience](#proxy-resilience)
+14. [Per-Tribe Rate Limiting](#per-tribe-rate-limiting)
+15. [Circuit Breaker Visibility](#circuit-breaker-visibility)
+16. [Kafka Event Bus](#kafka-event-bus)
+17. [Prometheus Metrics](#prometheus-metrics)
+18. [Distributed Tracing (OpenTelemetry)](#distributed-tracing-opentelemetry)
+19. [Health Checks](#health-checks)
+20. [Secrets Management](#secrets-management)
+21. [SDK — TribeClient](#sdk--tribeclient)
+22. [Docker](#docker)
+23. [Development](#development)
+24. [License](#license)
 
 ---
 
@@ -46,8 +48,9 @@ The gateway then:
 - **Authorizes** calls using scope-based access control from the registry
 - **Proxies** traffic to the correct upstream microservice via the appropriate namespace
 - **Logs** every request/response as structured Kafka audit events (Zod-validated)
-- **Protects** upstream services with circuit breakers (external 3rd-party APIs) and rate limiting
-- **Persists** the service registry in Redis so services survive gateway restarts
+- **Protects** upstream services with per-service circuit breakers (proxy + external APIs), hard timeouts (30 s), and per-tribe rate limiting
+- **Monitors** upstream health actively (30 s cron pings each service's `/health` endpoint)
+- **Persists** the service registry in Redis with strict write durability (2 s timeout, automatic rollback on failure) and 5-minute drift reconciliation
 - **Observes** all traffic via Prometheus metrics and Jaeger distributed traces
 - **Scales** horizontally — 3 stateless instances behind NGINX load balancer
 
@@ -86,7 +89,7 @@ The gateway then:
 │                                                                   │
 │  ┌─────────────┐  ┌──────────────────────────────────────────┐   │
 │  │ HealthModule │  │     KafkaModule (KRaft — global)          │   │
-│  │ - /live      │  │  11 active + 5 reserved topics            │   │
+│  │ - /live      │  │  14 active + 4 reserved topics            │   │
 │  │ - /ready     │  │  Zod-validated • audit trail               │   │
 │  └─────────────┘  └──────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘
@@ -147,7 +150,8 @@ src/
 │   ├── errors.ts                    # Error hierarchy extending HttpException
 │   ├── circuit-breaker.ts           # Circuit breaker with onStateChange callbacks
 │   ├── redis-throttler-storage.ts   # Redis-backed ThrottlerStorage (in-memory fallback)
-│   ├── proxy-handler.ts             # Reusable reverse-proxy utility (shared by tribes + shared-services)
+│   ├── proxy-handler.ts             # Reusable reverse-proxy with per-service circuit breakers + 30 s timeout
+│   ├── proxy-handler.spec.ts        # Unit tests for ProxyHandler (22 tests)
 │   ├── shared.module.ts             # @Global — exports Logger, filters, interceptors, throttler storage
 │   ├── dto/
 │   │   ├── token-request.dto.ts     # Token issuance DTO
@@ -164,7 +168,7 @@ src/
 │       └── morgan.middleware.ts      # HTTP request logging via Morgan
 │
 ├── kafka/
-│   ├── topics.ts                    # 11 active + 5 reserved topic definitions
+│   ├── topics.ts                    # 14 active + 4 reserved topic definitions
 │   ├── kafka.service.ts             # KafkaJS producer/consumer with Zod validation
 │   ├── kafka.module.ts              # @Global module
 │   └── schemas/                     # Zod schemas for every Kafka event type
@@ -172,7 +176,8 @@ src/
 │       ├── gateway.schemas.ts       # GatewayRequest/Response/Error events
 │       ├── audit.schemas.ts         # AuditLogEvent
 │       ├── external.schemas.ts      # ExternalRequestEvent
-│       ├── registry.schemas.ts      # ServiceRegistered/Deregistered events
+│       ├── registry.schemas.ts      # ServiceRegistered/Deregistered/HealthChanged events
+│       ├── auth.schemas.ts          # TokenIssuedEvent schema
 │       └── tribe.schemas.ts         # TribeRequest/Response events
 │
 ├── metrics/
@@ -182,17 +187,19 @@ src/
 │
 ├── auth/
 │   ├── descope.service.ts           # Descope SDK wrapper (validate, issue, refresh)
-│   ├── auth.controller.ts           # POST /auth/token, POST /auth/token/refresh
+│   ├── auth.controller.ts           # POST /auth/token + Kafka TOKEN_ISSUED event
 │   ├── auth.module.ts               # Provides DescopeService + guards
 │   └── guards/
 │       ├── descope-auth.guard.ts    # CanActivate — JWT validation
 │       ├── platform-admin.guard.ts  # CanActivate — X-Platform-Secret check (legacy)
-│       └── scoped-admin.guard.ts    # CanActivate — dual-mode: legacy secret OR JWT with platform:admin scope
+│       ├── scoped-admin.guard.ts    # CanActivate — dual-mode: legacy secret OR JWT with platform:admin scope
+│       └── tribe-throttler.guard.ts # Per-tribe rate-limit buckets (tribeId instead of IP)
 │
 ├── registry/
-│   ├── registry.service.ts          # In-memory + Redis-persisted service registry
+│   ├── registry.service.ts          # In-memory + Redis-persisted service registry (strict writes)
 │   ├── registry.controller.ts       # CRUD for services (platform-admin only)
-│   └── registry.module.ts           # Exports RegistryService
+│   ├── registry.module.ts           # Exports RegistryService (imports ScheduleModule)
+│   └── health-monitor.service.ts    # Active health checks (30 s) + Redis drift reconciliation (5 min)
 │
 ├── tribes/
 │   ├── tribes.controller.ts         # Dynamic reverse proxy (namespace: tribe) via ProxyHandler
@@ -453,12 +460,14 @@ Services register themselves at startup by sending a **ServiceManifest**:
 ```
 
 The registry then:
-- Stores the entry in the **in-memory Map** (zero-latency lookups) and **persists it to Redis** (source of truth)
+- Stores the entry in the **in-memory Map** (zero-latency lookups) and **persists it to Redis** with **strict write durability** (2 s timeout — on failure the in-memory write is rolled back so memory and Redis never silently drift)
 - On gateway restart, the in-memory Map is **hydrated from Redis** — services don't need to re-register
+- **Redis drift reconciliation** runs every **5 minutes** — compares in-memory state with Redis and resyncs on divergence
 - Publishes a `SERVICE_REGISTERED` Kafka event (Zod-validated)
 - Makes the service available for proxy routing via `/tribes/user-service/*` (tribe) or `/shared/user-service/*` (shared)
 - Enforces that only services listed in `consumes` can call this service
 - Updates the `registry_services_total` Prometheus gauge
+- **Cache invalidation**: when a service re-registers with a different `baseUrl`, stale proxy middleware is automatically dropped via `onCacheInvalidation` listeners
 
 ---
 
@@ -569,6 +578,58 @@ Each API has:
 
 ---
 
+## Proxy Resilience
+
+Every request proxied through `/tribes/*` or `/shared/*` passes through the `ProxyHandler`, which applies **three layers of resilience** before the request leaves the gateway:
+
+### 1. Per-Service Circuit Breakers
+
+Each upstream service gets its own `CircuitBreaker` instance (keyed by `serviceId`). This prevents a single failing service from impacting unrelated upstreams.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `failureThreshold` | 5 | Consecutive failures before the breaker opens |
+| `resetTimeoutMs` | 30 000 | Cooldown before transitioning OPEN → HALF_OPEN |
+| `successThreshold` | 2 | Successful requests in HALF_OPEN needed to close |
+
+**Failure signals** (any of these increments the failure counter):
+- Upstream returns HTTP **502**, **503**, or **504**
+- Proxy-level network errors: `ECONNREFUSED`, `ETIMEDOUT`, socket hang-up
+
+When a breaker is **OPEN**, subsequent requests are rejected immediately with a `503 Service Unavailable` — no connection is attempted.
+
+### 2. Hard Proxy Timeout
+
+All outgoing proxy requests have a **30-second hard timeout** (`proxyTimeout` + `timeout` on `http-proxy-middleware`). This prevents slow upstreams from exhausting the gateway's connection pool.
+
+### 3. Proxy Cache Invalidation
+
+Proxy middleware instances are cached per service for performance. When a service **re-registers** with a different `baseUrl`, the `ProxyHandler` automatically drops the stale cached instance via `onCacheInvalidation` so the next request creates a fresh proxy pointing at the new URL.
+
+---
+
+## Per-Tribe Rate Limiting
+
+Rate limiting uses **`@nestjs/throttler`** with a **Redis-backed storage** (`RedisThrottlerStorage`) so limits are enforced consistently across all 3 gateway instances. A custom **`TribeThrottlerGuard`** replaces the default per-IP bucketing with **per-tribe** bucketing:
+
+| Priority | Bucket Key Source | When Used |
+|----------|-------------------|-----------|
+| 1 | `x-tribe-id` header | Set by the gateway proxy on forwarded requests |
+| 2 | `req.user.tribeId` | Extracted from Descope JWT claims |
+| 3 | `req.user.token.tribeId` | Nested Descope token shape |
+| 4 | Client IP | Fallback for unauthenticated / anonymous traffic |
+
+This prevents a single noisy tribe from exhausting the rate limit quota for all other tribes. The guard is registered globally via `APP_GUARD` in `AppModule`.
+
+| Config Variable | Default | Description |
+|-----------------|---------|-------------|
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Sliding window duration (ms) |
+| `RATE_LIMIT_MAX` | `100` | Max requests per tribe per window |
+
+If Redis is unavailable, the throttler falls back transparently to in-memory storage (per-instance limits instead of global).
+
+---
+
 ## Circuit Breaker Visibility
 
 Circuit breakers now emit observability events on every state transition:
@@ -590,7 +651,7 @@ Circuit breakers now emit observability events on every state transition:
 
 ## Kafka Event Bus
 
-**11 active topics** (Zod-validated) plus **5 reserved topics** (defined but not yet in use). Every event is validated against a Zod schema before publishing — malformed payloads are rejected and logged, never sent to Kafka.
+**14 active topics** (Zod-validated) plus **4 reserved topics** (defined but not yet in use). Every event is validated against a Zod schema before publishing — malformed payloads are rejected and logged, never sent to Kafka.
 
 ### Active Topics
 
@@ -600,7 +661,8 @@ Circuit breakers now emit observability events on every state transition:
 | Tribes | `tribe.request`, `tribe.response` | `TribeRequestEventSchema`, `TribeResponseEventSchema` |
 | External | `external.request` | `ExternalRequestEventSchema` |
 | Audit | `audit.log` | `AuditLogEventSchema` |
-| Registry | `registry.service-registered`, `registry.service-deregistered`, `registry.service-deprecated`, `registry.service-retired`, `registry.service-version-changed` | `RegistryService*EventSchema` |
+| Registry | `registry.service-registered`, `registry.service-deregistered`, `registry.service-deprecated`, `registry.service-retired`, `registry.service-version-changed`, `registry.service-health-changed` | `RegistryService*EventSchema` |
+| Auth | `auth.token-issued` | `TokenIssuedEventSchema` |
 
 ### Reserved Topics (not yet wired)
 
@@ -609,7 +671,6 @@ Circuit breakers now emit observability events on every state transition:
 | `tribe.event` | General tribe lifecycle events |
 | `external.response` | Third-party API response logging |
 | `external.webhook` | Inbound webhook relay |
-| `auth.token-issued` | Token issuance audit |
 | `auth.token-revoked` | Token revocation audit |
 
 All events include `_meta` with `timestamp`, `source`, and `correlationId`.
@@ -671,12 +732,28 @@ All HTTP requests are automatically instrumented with OpenTelemetry and exported
 
 ## Health Checks
 
-Built with `@nestjs/terminus`:
+### Passive (endpoint-based) — built with `@nestjs/terminus`
 
 - **`GET /api/v1/health/live`** — Returns `200` if the process is alive. Used by Kubernetes liveness probes.
 - **`GET /api/v1/health/ready`** — Checks Kafka connectivity, registry state, and **circuit breaker states**. Used by Kubernetes readiness probes. Reports `down` if any circuit breaker is OPEN.
 
 Response includes process uptime, memory usage, service counts, and per-breaker state details.
+
+### Active (cron-based) — `HealthMonitorService`
+
+The gateway **actively pings every registered upstream** to detect failures before traffic hits them:
+
+| Cron Job | Interval | Description |
+|----------|----------|-------------|
+| **Health check sweep** | Every **30 seconds** | Sends `GET baseUrl + healthCheck` to each active/deprecated service (5 s timeout per request). Status code < 500 = healthy. |
+| **Redis drift reconciliation** | Every **5 minutes** | Compares in-memory registry with Redis source of truth. Resyncs on divergence (missing keys, stale `updatedAt`). |
+
+**On health state change** (healthy → unhealthy or vice versa):
+1. `RegistryService.setHealthStatus()` updates the in-memory entry + best-effort Redis persist
+2. A `SERVICE_HEALTH_CHANGED` Kafka event is emitted with `{ serviceId, healthy, previousStatus, timestamp }`
+3. `isRoutable()` returns `false` for unhealthy services — the proxy rejects requests before they leave the gateway
+
+**Overlap guards** prevent concurrent sweeps if a cron fires while the previous run is still executing.
 
 ---
 
@@ -702,28 +779,67 @@ AWS_REGION=us-east-1
 
 ## SDK — TribeClient
 
-A standalone HTTP client for tribe microservices to communicate with the gateway:
+A standalone HTTP client for tribe microservices to communicate with the gateway.
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Automatic retries** | Transient failures (5xx / network errors) are retried up to 3× with exponential backoff and ±25 % jitter |
+| **Typed errors** | Every gateway error is mapped to a typed exception: `GatewayTimeoutError`, `ServiceNotFoundError`, `RateLimitError`, `AuthenticationError`, `NetworkError`, etc. |
+| **Shared-service calls** | `callSharedService()` routes through `/api/v1/shared/*` for platform services |
+| **Auto-refresh** | Tokens are refreshed transparently before expiry |
+
+### Quick Start
 
 ```typescript
-import { TribeClient } from './sdk/TribeClient';
+import {
+  TribeClient,
+  ServiceNotFoundError,
+  GatewayTimeoutError,
+} from './sdk/TribeClient';
 
 const client = new TribeClient({
   gatewayUrl: 'http://localhost:3000',
   tribeId: 'my-service',
   secret: process.env.MY_SERVICE_SECRET!,
+  maxRetries: 3,             // default
+  retryBaseDelayMs: 500,     // default (doubles each attempt)
 });
 
-// Authenticate (auto-refreshes)
 await client.authenticate();
 
-// Call another registered service
+// Call a tribe service (retries automatically on 502/503/504)
 const users = await client.callService('user-service', '/users');
+
+// Call a shared (platform) service
+const receipt = await client.callSharedService('email-service', '/send', {
+  method: 'POST',
+  data: { to: 'user@example.com', subject: 'Hello' },
+});
 
 // Call an external API
 const location = await client.callExternal('geolocation', '/lookup?ip=8.8.8.8');
 
 // List available services
 const services = await client.listServices();
+const shared   = await client.listSharedServices();
+```
+
+### Error Handling
+
+```typescript
+try {
+  await client.callService('payments', '/charge');
+} catch (err) {
+  if (err instanceof ServiceNotFoundError) {
+    console.error('Service not registered');
+  } else if (err instanceof GatewayTimeoutError) {
+    console.error('Upstream timed out after retries');
+  } else if (err instanceof RateLimitError) {
+    console.error(`Slow down — retry after ${err.retryAfterMs}ms`);
+  }
+}
 ```
 
 ---

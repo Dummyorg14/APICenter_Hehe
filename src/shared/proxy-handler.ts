@@ -4,6 +4,11 @@
 // Extracted from TribesController so both /tribes/* and /shared/* controllers
 // can compose the same proxy creation, lifecycle gating, scope checking, and
 // metrics recording without code duplication.
+//
+// RESILIENCE:
+//  - Per-service CircuitBreaker: rejects requests fast when upstreams fail.
+//  - Hard proxyTimeout (30 s): prevents slow upstreams from exhausting connections.
+//  - Cache invalidation: stale proxy instances are dropped on re-registration.
 // =============================================================================
 
 import { Response } from 'express';
@@ -12,12 +17,20 @@ import { RegistryService } from '../registry/registry.service';
 import { DescopeService } from '../auth/descope.service';
 import { LoggerService } from '../shared/logger.service';
 import { MetricsService } from '../metrics/metrics.service';
+import { CircuitBreaker } from '../shared/circuit-breaker';
 import {
   ForbiddenError,
   NotFoundError,
   BadGatewayError,
+  ServiceUnavailableError,
 } from '../shared/errors';
 import { AuthenticatedRequest, ServiceType } from '../types';
+
+/** Default hard timeout for outgoing proxy requests (ms). */
+const PROXY_TIMEOUT_MS = 30_000;
+
+/** HTTP status codes that indicate upstream failure for circuit-breaker tracking. */
+const UPSTREAM_FAILURE_CODES = new Set([502, 503, 504]);
 
 /** HTTP 410 Gone — service has been retired */
 export class GoneError extends NotFoundError {
@@ -39,23 +52,53 @@ export interface ProxyOptions {
   namespace: ServiceType;
   /** The URL prefix to strip, e.g. '/api/v1/tribes' or '/api/v1/shared' */
   pathPrefix: string;
+  /** Outgoing proxy timeout in ms (default: 30 000) */
+  proxyTimeoutMs?: number;
 }
 
 /**
  * Reusable proxy handler that both TribesController and SharedServicesController
- * compose for dynamic upstream proxying with lifecycle gating & scope checks.
+ * compose for dynamic upstream proxying with lifecycle gating, scope checks,
+ * per-service circuit breakers, and cache invalidation.
  */
 export class ProxyHandler {
   private readonly proxyCache = new Map<string, ReturnType<typeof createProxyMiddleware>>();
+  private readonly circuitBreakers = new Map<string, CircuitBreaker>();
+  private readonly proxyTimeoutMs: number;
+  private readonly unsubscribeCacheInvalidation: () => void;
 
   constructor(
     private readonly deps: ProxyHandlerDeps,
     private readonly opts: ProxyOptions,
-  ) {}
+  ) {
+    this.proxyTimeoutMs = opts.proxyTimeoutMs ?? PROXY_TIMEOUT_MS;
 
-  /** Clear the proxy cache (call from onModuleDestroy). */
+    // Subscribe to registry re-registration events so stale proxy instances
+    // are dropped automatically when a service's baseUrl changes.
+    this.unsubscribeCacheInvalidation = deps.registry.onCacheInvalidation(
+      (serviceId) => this.invalidateProxyCache(serviceId),
+    );
+  }
+
+  /** Clear the entire proxy cache and circuit breakers (call from onModuleDestroy). */
   destroy(): void {
+    this.unsubscribeCacheInvalidation();
     this.proxyCache.clear();
+    this.circuitBreakers.clear();
+  }
+
+  /**
+   * Remove the cached proxy middleware for a specific service so the next
+   * request creates a fresh instance pointing at the latest baseUrl.
+   */
+  invalidateProxyCache(serviceId: string): void {
+    const existed = this.proxyCache.delete(serviceId);
+    if (existed) {
+      this.deps.logger.info(`Proxy cache invalidated for '${serviceId}'`, {
+        serviceId,
+        namespace: this.opts.namespace,
+      });
+    }
   }
 
   /**
@@ -134,24 +177,56 @@ export class ProxyHandler {
       }
     }
 
-    // ── 3. Get or create proxy ─────────────────────────────────────────────
+    // ── 3. Circuit-breaker gate ────────────────────────────────────────────
+    const breaker = this.getOrCreateCircuitBreaker(targetServiceId);
+    if (!breaker.tryAcquire()) {
+      this.deps.logger.warn(
+        `Circuit breaker OPEN for '${targetServiceId}' — rejecting request`,
+        'ProxyHandler',
+      );
+      throw new ServiceUnavailableError(
+        `Upstream '${targetServiceId}' is temporarily unavailable (circuit breaker open)`,
+      );
+    }
+
+    // ── 4. Get or create proxy ─────────────────────────────────────────────
     let proxy = this.proxyCache.get(targetServiceId);
 
     if (!proxy) {
       const proxyOpts: Options = {
         target: upstream,
         changeOrigin: true,
+        proxyTimeout: this.proxyTimeoutMs,
+        timeout: this.proxyTimeoutMs,
         pathRewrite: {
           [`^${this.opts.pathPrefix}/${targetServiceId}`]: '',
         },
         on: {
           proxyReq: (proxyReq, _req) => {
-            const authReq = _req as AuthenticatedRequest;
+            const authReq = _req as unknown as AuthenticatedRequest;
             proxyReq.setHeader('X-Tribe-Id', authReq.tribeId || '');
             proxyReq.setHeader('X-Correlation-ID', authReq.correlationId || '');
             proxyReq.setHeader('X-Forwarded-By', 'apicenter-gateway');
           },
+          proxyRes: (proxyRes) => {
+            const status = proxyRes.statusCode ?? 0;
+            const cb = this.circuitBreakers.get(targetServiceId);
+            if (cb) {
+              if (UPSTREAM_FAILURE_CODES.has(status)) {
+                cb.recordFailure();
+                this.deps.logger.warn(
+                  `Upstream '${targetServiceId}' returned ${status} — circuit-breaker failure recorded`,
+                  'ProxyHandler',
+                );
+              } else {
+                cb.recordSuccess();
+              }
+            }
+          },
           error: (err) => {
+            // Record every proxy-level error (timeouts, ECONNREFUSED, etc.)
+            const cb = this.circuitBreakers.get(targetServiceId);
+            if (cb) cb.recordFailure();
             this.deps.logger.error(
               `Proxy error for ${targetServiceId}: ${err.message}`,
             );
@@ -171,11 +246,12 @@ export class ProxyHandler {
         targetServiceId,
         upstream,
         namespace: this.opts.namespace,
+        proxyTimeoutMs: this.proxyTimeoutMs,
         correlationId,
       });
     }
 
-    // ── 4. Forward the request ─────────────────────────────────────────────
+    // ── 5. Forward the request ─────────────────────────────────────────────
     const proxyStart = Date.now();
 
     res.on('finish', () => {
@@ -210,6 +286,20 @@ export class ProxyHandler {
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  /** Return the existing circuit breaker for a service, or create a new one. */
+  private getOrCreateCircuitBreaker(serviceId: string): CircuitBreaker {
+    let breaker = this.circuitBreakers.get(serviceId);
+    if (!breaker) {
+      breaker = new CircuitBreaker(`proxy:${serviceId}`, this.deps.logger, {
+        failureThreshold: 5,
+        resetTimeoutMs: 30_000,
+        successThreshold: 2,
+      });
+      this.circuitBreakers.set(serviceId, breaker);
+    }
+    return breaker;
+  }
 
   /** Reject retired services (410) and set RFC 8594 deprecation headers. */
   private enforceLifecycleGate(

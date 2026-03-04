@@ -36,14 +36,14 @@ export class RegistryController {
    * POST /api/v1/registry/register
    */
   @Post('register')
-  register(@Body() dto: ServiceManifestDto, @Req() req: AuthenticatedRequest) {
+  async register(@Body() dto: ServiceManifestDto, @Req() req: AuthenticatedRequest) {
     const manifest = {
       ...dto,
       consumes: dto.consumes ?? [],
       serviceTier: dto.serviceTier as ServiceTier | undefined,
       serviceType: (dto.serviceType ?? 'tribe') as ServiceType,
     };
-    const entry = this.registry.register(manifest);
+    const entry = await this.registry.register(manifest);
 
     this.logger.info('Service registered via API', {
       serviceId: entry.serviceId,
@@ -117,8 +117,8 @@ export class RegistryController {
    * DELETE /api/v1/registry/services/:serviceId
    */
   @Delete('services/:serviceId')
-  deregister(@Param('serviceId') serviceId: string, @Req() req: AuthenticatedRequest) {
-    this.registry.deregister(serviceId);
+  async deregister(@Param('serviceId') serviceId: string, @Req() req: AuthenticatedRequest) {
+    await this.registry.deregister(serviceId);
 
     this.logger.info('Service deregistered via API', {
       serviceId,

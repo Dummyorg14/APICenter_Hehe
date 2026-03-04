@@ -9,6 +9,7 @@ import { AuthController } from './auth.controller';
 import { DescopeService } from './descope.service';
 import { RegistryService } from '../registry/registry.service';
 import { LoggerService } from '../shared/logger.service';
+import { KafkaService } from '../kafka/kafka.service';
 import { NotFoundError, UnauthorizedError } from '../shared/errors';
 import { AuthenticatedRequest } from '../types';
 
@@ -30,6 +31,10 @@ const mockLogger: Partial<LoggerService> = {
   error: jest.fn(),
 };
 
+const mockKafka: Partial<KafkaService> = {
+  publish: jest.fn().mockResolvedValue(undefined),
+};
+
 function fakeReq(overrides: Partial<AuthenticatedRequest> = {}): AuthenticatedRequest {
   return { correlationId: 'corr-1' } as AuthenticatedRequest;
 }
@@ -45,6 +50,7 @@ describe('AuthController', () => {
       mockDescope as DescopeService,
       mockRegistry as RegistryService,
       mockLogger as LoggerService,
+      mockKafka as KafkaService,
     );
   });
 
@@ -104,6 +110,35 @@ describe('AuthController', () => {
       (mockRegistry.validateSecret as jest.Mock).mockResolvedValue(false);
 
       await expect(controller.issueToken(dto, fakeReq())).rejects.toThrow(UnauthorizedError);
+    });
+
+    it('publishes TOKEN_ISSUED Kafka event (without raw JWT)', async () => {
+      (mockRegistry.get as jest.Mock).mockReturnValue({
+        serviceId: 'svc-alpha',
+        requiredScopes: ['read'],
+        consumes: [],
+      });
+      (mockRegistry.validateSecret as jest.Mock).mockResolvedValue(true);
+      (mockDescope.issueToken as jest.Mock).mockResolvedValue({
+        sessionJwt: 'access-jwt',
+        refreshJwt: 'refresh-jwt',
+        expiresIn: 3600,
+      });
+
+      await controller.issueToken(dto, fakeReq());
+
+      expect(mockKafka.publish).toHaveBeenCalledTimes(1);
+      const [topic, payload, key] = (mockKafka.publish as jest.Mock).mock.calls[0];
+      expect(topic).toBe('api-center.auth.token-issued');
+      expect(key).toBe('svc-alpha');
+      expect(payload.tribeId).toBe('svc-alpha');
+      expect(payload.scopes).toEqual(['read']);
+      expect(payload.permissions).toEqual(expect.arrayContaining(['tribe:svc-alpha:read']));
+      expect(payload.expiresIn).toBe(3600);
+      expect(payload.timestamp).toBeDefined();
+      // Raw JWT must NEVER appear in the event
+      expect(JSON.stringify(payload)).not.toContain('access-jwt');
+      expect(JSON.stringify(payload)).not.toContain('refresh-jwt');
     });
   });
 

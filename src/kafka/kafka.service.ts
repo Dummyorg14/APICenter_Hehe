@@ -26,8 +26,10 @@ import {
   RegistryServiceDeprecatedEventSchema,
   RegistryServiceRetiredEventSchema,
   RegistryServiceVersionChangedEventSchema,
+  RegistryServiceHealthChangedEventSchema,
   TribeRequestEventSchema,
   TribeResponseEventSchema,
+  TokenIssuedEventSchema,
 } from './schemas';
 
 /**
@@ -45,8 +47,10 @@ const TOPIC_SCHEMAS: Record<string, ZodSchema> = {
   [TOPICS.SERVICE_DEPRECATED]: RegistryServiceDeprecatedEventSchema,
   [TOPICS.SERVICE_RETIRED]: RegistryServiceRetiredEventSchema,
   [TOPICS.SERVICE_VERSION_CHANGED]: RegistryServiceVersionChangedEventSchema,
+  [TOPICS.SERVICE_HEALTH_CHANGED]: RegistryServiceHealthChangedEventSchema,
   [TOPICS.TRIBE_REQUEST]: TribeRequestEventSchema,
   [TOPICS.TRIBE_RESPONSE]: TribeResponseEventSchema,
+  [TOPICS.TOKEN_ISSUED]: TokenIssuedEventSchema,
 };
 
 @Injectable()

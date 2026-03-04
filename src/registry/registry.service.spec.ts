@@ -72,40 +72,40 @@ describe('RegistryService', () => {
   // =========================================================================
 
   describe('register()', () => {
-    it('registers a new service and returns an active entry', () => {
-      const entry = service.register(baseManifest());
+    it('registers a new service and returns an active entry', async () => {
+      const entry = await service.register(baseManifest());
       expect(entry.serviceId).toBe('svc-alpha');
       expect(entry.status).toBe('active');
       expect(entry.registeredAt).toBeDefined();
       expect(entry.updatedAt).toBeDefined();
     });
 
-    it('publishes a SERVICE_REGISTERED Kafka event', () => {
-      service.register(baseManifest());
+    it('publishes a SERVICE_REGISTERED Kafka event', async () => {
+      await service.register(baseManifest());
       expect(mockKafka.publish).toHaveBeenCalledWith(
         TOPICS.SERVICE_REGISTERED,
         expect.objectContaining({ serviceId: 'svc-alpha', isUpdate: false }),
       );
     });
 
-    it('syncs the metrics gauge', () => {
-      service.register(baseManifest());
+    it('syncs the metrics gauge', async () => {
+      await service.register(baseManifest());
       expect(mockMetrics.setRegistryServicesCount).toHaveBeenCalledWith(1);
     });
 
-    it('updates an existing service while preserving registeredAt', () => {
-      const first = service.register(baseManifest());
-      const second = service.register(baseManifest({ version: '1.1.0' }));
+    it('updates an existing service while preserving registeredAt', async () => {
+      const first = await service.register(baseManifest());
+      const second = await service.register(baseManifest({ version: '1.1.0' }));
 
       expect(second.registeredAt).toBe(first.registeredAt);
       expect(second.previousVersion).toBe('1.0.0');
     });
 
-    it('rejects re-registration of a retired service', () => {
-      service.register(baseManifest());
+    it('rejects re-registration of a retired service', async () => {
+      await service.register(baseManifest());
       service.retire('svc-alpha');
 
-      expect(() => service.register(baseManifest({ version: '2.0.0' }))).toThrow(ConflictError);
+      await expect(service.register(baseManifest({ version: '2.0.0' }))).rejects.toThrow(ConflictError);
     });
   });
 
@@ -114,9 +114,9 @@ describe('RegistryService', () => {
   // =========================================================================
 
   describe('deregister()', () => {
-    it('removes the service and emits a Kafka event', () => {
-      service.register(baseManifest());
-      service.deregister('svc-alpha');
+    it('removes the service and emits a Kafka event', async () => {
+      await service.register(baseManifest());
+      await service.deregister('svc-alpha');
 
       expect(service.get('svc-alpha')).toBeNull();
       expect(mockKafka.publish).toHaveBeenCalledWith(
@@ -125,13 +125,13 @@ describe('RegistryService', () => {
       );
     });
 
-    it('throws NotFoundError for unknown service', () => {
-      expect(() => service.deregister('unknown')).toThrow(NotFoundError);
+    it('throws NotFoundError for unknown service', async () => {
+      await expect(service.deregister('unknown')).rejects.toThrow(NotFoundError);
     });
 
-    it('sets metrics gauge to 0 after last service removed', () => {
-      service.register(baseManifest());
-      service.deregister('svc-alpha');
+    it('sets metrics gauge to 0 after last service removed', async () => {
+      await service.register(baseManifest());
+      await service.deregister('svc-alpha');
       expect(mockMetrics.setRegistryServicesCount).toHaveBeenLastCalledWith(0);
     });
   });
@@ -141,8 +141,8 @@ describe('RegistryService', () => {
   // =========================================================================
 
   describe('deprecate()', () => {
-    it('marks a service as deprecated with optional sunset info', () => {
-      service.register(baseManifest());
+    it('marks a service as deprecated with optional sunset info', async () => {
+      await service.register(baseManifest());
       const entry = service.deprecate('svc-alpha', '2025-12-31', 'svc-beta');
 
       expect(entry.status).toBe('deprecated');
@@ -150,8 +150,8 @@ describe('RegistryService', () => {
       expect(entry.replacementService).toBe('svc-beta');
     });
 
-    it('emits a SERVICE_DEPRECATED Kafka event', () => {
-      service.register(baseManifest());
+    it('emits a SERVICE_DEPRECATED Kafka event', async () => {
+      await service.register(baseManifest());
       service.deprecate('svc-alpha');
 
       expect(mockKafka.publish).toHaveBeenCalledWith(
@@ -164,22 +164,22 @@ describe('RegistryService', () => {
       expect(() => service.deprecate('unknown')).toThrow(NotFoundError);
     });
 
-    it('throws ConflictError when depreciating an already retired service', () => {
-      service.register(baseManifest());
+    it('throws ConflictError when depreciating an already retired service', async () => {
+      await service.register(baseManifest());
       service.retire('svc-alpha');
       expect(() => service.deprecate('svc-alpha')).toThrow(ConflictError);
     });
   });
 
   describe('retire()', () => {
-    it('marks a service as retired', () => {
-      service.register(baseManifest());
+    it('marks a service as retired', async () => {
+      await service.register(baseManifest());
       const entry = service.retire('svc-alpha');
       expect(entry.status).toBe('retired');
     });
 
-    it('emits a SERVICE_RETIRED Kafka event', () => {
-      service.register(baseManifest());
+    it('emits a SERVICE_RETIRED Kafka event', async () => {
+      await service.register(baseManifest());
       service.retire('svc-alpha');
 
       expect(mockKafka.publish).toHaveBeenCalledWith(
@@ -194,8 +194,8 @@ describe('RegistryService', () => {
   });
 
   describe('activate()', () => {
-    it('transitions deprecated → active and clears sunset fields', () => {
-      service.register(baseManifest());
+    it('transitions deprecated → active and clears sunset fields', async () => {
+      await service.register(baseManifest());
       service.deprecate('svc-alpha', '2025-12-31', 'svc-beta');
       const entry = service.activate('svc-alpha');
 
@@ -204,8 +204,8 @@ describe('RegistryService', () => {
       expect(entry.replacementService).toBeUndefined();
     });
 
-    it('throws ConflictError for already-active services', () => {
-      service.register(baseManifest());
+    it('throws ConflictError for already-active services', async () => {
+      await service.register(baseManifest());
       expect(() => service.activate('svc-alpha')).toThrow(ConflictError);
     });
 
@@ -219,37 +219,37 @@ describe('RegistryService', () => {
   // =========================================================================
 
   describe('version governance', () => {
-    it('allows minor and patch upgrades', () => {
-      service.register(baseManifest({ version: '1.0.0' }));
+    it('allows minor and patch upgrades', async () => {
+      await service.register(baseManifest({ version: '1.0.0' }));
 
-      expect(() =>
+      await expect(
         service.register(baseManifest({ version: '1.1.0' })),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
 
-      expect(() =>
+      await expect(
         service.register(baseManifest({ version: '1.1.1' })),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
     });
 
-    it('allows major upgrades', () => {
-      service.register(baseManifest({ version: '1.5.3' }));
+    it('allows major upgrades', async () => {
+      await service.register(baseManifest({ version: '1.5.3' }));
 
-      expect(() =>
+      await expect(
         service.register(baseManifest({ version: '2.0.0' })),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
     });
 
-    it('rejects major version downgrades', () => {
-      service.register(baseManifest({ version: '2.0.0' }));
+    it('rejects major version downgrades', async () => {
+      await service.register(baseManifest({ version: '2.0.0' }));
 
-      expect(() =>
+      await expect(
         service.register(baseManifest({ version: '1.9.9' })),
-      ).toThrow(ValidationError);
+      ).rejects.toThrow(ValidationError);
     });
 
-    it('emits SERVICE_VERSION_CHANGED on version update', () => {
-      service.register(baseManifest({ version: '1.0.0' }));
-      service.register(baseManifest({ version: '1.1.0' }));
+    it('emits SERVICE_VERSION_CHANGED on version update', async () => {
+      await service.register(baseManifest({ version: '1.0.0' }));
+      await service.register(baseManifest({ version: '1.1.0' }));
 
       expect(mockKafka.publish).toHaveBeenCalledWith(
         TOPICS.SERVICE_VERSION_CHANGED,
@@ -261,10 +261,10 @@ describe('RegistryService', () => {
       );
     });
 
-    it('does not emit VERSION_CHANGED when version is unchanged', () => {
-      service.register(baseManifest({ version: '1.0.0' }));
+    it('does not emit VERSION_CHANGED when version is unchanged', async () => {
+      await service.register(baseManifest({ version: '1.0.0' }));
       (mockKafka.publish as jest.Mock).mockClear();
-      service.register(baseManifest({ version: '1.0.0' }));
+      await service.register(baseManifest({ version: '1.0.0' }));
 
       const versionCalls = (mockKafka.publish as jest.Mock).mock.calls.filter(
         ([topic]: [string]) => topic === TOPICS.SERVICE_VERSION_CHANGED,
@@ -278,19 +278,19 @@ describe('RegistryService', () => {
   // =========================================================================
 
   describe('isRoutable()', () => {
-    it('returns true for active services', () => {
-      service.register(baseManifest());
+    it('returns true for active services', async () => {
+      await service.register(baseManifest());
       expect(service.isRoutable('svc-alpha')).toBe(true);
     });
 
-    it('returns true for deprecated services', () => {
-      service.register(baseManifest());
+    it('returns true for deprecated services', async () => {
+      await service.register(baseManifest());
       service.deprecate('svc-alpha');
       expect(service.isRoutable('svc-alpha')).toBe(true);
     });
 
-    it('returns false for retired services', () => {
-      service.register(baseManifest());
+    it('returns false for retired services', async () => {
+      await service.register(baseManifest());
       service.retire('svc-alpha');
       expect(service.isRoutable('svc-alpha')).toBe(false);
     });
@@ -305,23 +305,23 @@ describe('RegistryService', () => {
   // =========================================================================
 
   describe('canConsume()', () => {
-    it('returns true when source consumes target', () => {
-      service.register(baseManifest({ serviceId: 'svc-a', consumes: ['svc-b'] }));
-      service.register(baseManifest({ serviceId: 'svc-b', consumes: [] }));
+    it('returns true when source consumes target', async () => {
+      await service.register(baseManifest({ serviceId: 'svc-a', consumes: ['svc-b'] }));
+      await service.register(baseManifest({ serviceId: 'svc-b', consumes: [] }));
       expect(service.canConsume('svc-a', 'svc-b')).toBe(true);
     });
 
-    it('returns false when source does not consume target', () => {
-      service.register(baseManifest({ serviceId: 'svc-a', consumes: [] }));
+    it('returns false when source does not consume target', async () => {
+      await service.register(baseManifest({ serviceId: 'svc-a', consumes: [] }));
       expect(service.canConsume('svc-a', 'svc-b')).toBe(false);
     });
   });
 
   describe('getConsumers()', () => {
-    it('returns list of services that consume the given serviceId', () => {
-      service.register(baseManifest({ serviceId: 'svc-a', consumes: ['svc-c'] }));
-      service.register(baseManifest({ serviceId: 'svc-b', consumes: ['svc-c'] }));
-      service.register(baseManifest({ serviceId: 'svc-c', consumes: [] }));
+    it('returns list of services that consume the given serviceId', async () => {
+      await service.register(baseManifest({ serviceId: 'svc-a', consumes: ['svc-c'] }));
+      await service.register(baseManifest({ serviceId: 'svc-b', consumes: ['svc-c'] }));
+      await service.register(baseManifest({ serviceId: 'svc-c', consumes: [] }));
 
       const consumers = service.getConsumers('svc-c');
       expect(consumers).toEqual(expect.arrayContaining(['svc-a', 'svc-b']));
@@ -334,13 +334,13 @@ describe('RegistryService', () => {
   // =========================================================================
 
   describe('full lifecycle: register → deprecate → retire', () => {
-    it('walks through the entire lifecycle', () => {
+    it('walks through the entire lifecycle', async () => {
       // 1. Register
-      const v1 = service.register(baseManifest());
+      const v1 = await service.register(baseManifest());
       expect(v1.status).toBe('active');
 
       // 2. Version bump
-      const v2 = service.register(baseManifest({ version: '1.1.0' }));
+      const v2 = await service.register(baseManifest({ version: '1.1.0' }));
       expect(v2.previousVersion).toBe('1.0.0');
 
       // 3. Deprecate
@@ -349,7 +349,7 @@ describe('RegistryService', () => {
       expect(service.isRoutable('svc-alpha')).toBe(true);
 
       // 4. Re-registering while deprecated keeps deprecated status
-      const v3 = service.register(baseManifest({ version: '1.2.0' }));
+      const v3 = await service.register(baseManifest({ version: '1.2.0' }));
       expect(v3.status).toBe('deprecated');
 
       // 5. Retire
@@ -358,7 +358,7 @@ describe('RegistryService', () => {
       expect(service.isRoutable('svc-alpha')).toBe(false);
 
       // 6. Cannot re-register once retired
-      expect(() => service.register(baseManifest({ version: '2.0.0' }))).toThrow(ConflictError);
+      await expect(service.register(baseManifest({ version: '2.0.0' }))).rejects.toThrow(ConflictError);
     });
   });
 });

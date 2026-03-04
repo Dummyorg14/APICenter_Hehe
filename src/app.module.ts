@@ -15,7 +15,7 @@
 
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { ConfigModule } from './config/config.module';
 import { ConfigService } from './config/config.service';
 import { SharedModule } from './shared/shared.module';
@@ -30,6 +30,7 @@ import { MetricsModule } from './metrics/metrics.module';
 import { SecurityMiddleware } from './shared/middleware/security.middleware';
 import { MorganMiddleware } from './shared/middleware/morgan.middleware';
 import { RedisThrottlerStorage } from './shared/redis-throttler-storage';
+import { TribeThrottlerGuard } from './shared/guards/tribe-throttler.guard';
 
 @Module({
   imports: [
@@ -65,10 +66,10 @@ import { RedisThrottlerStorage } from './shared/redis-throttler-storage';
     HealthModule,
   ],
   providers: [
-    // Apply throttler guard globally to all routes
+    // Apply per-tribe throttler guard globally to all routes
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: TribeThrottlerGuard,
     },
   ],
 })

@@ -112,6 +112,10 @@ export interface ServiceRegistryEntry extends ServiceManifest {
   status: ServiceLifecycleStatus;
   /** Previous version string — set on update when version changes */
   previousVersion?: string;
+  /** Runtime health — `true` (default) when the upstream responds to health checks */
+  healthy?: boolean;
+  /** ISO-8601 timestamp of the last successful or failed health check */
+  lastHealthCheckAt?: string;
 }
 
 /** Map of service ID → ServiceRegistryEntry */
